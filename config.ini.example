@@ -1,0 +1,37 @@
+# theATL.social WriteFreely — example configuration.
+# The real config.ini is supplied at deploy time and is gitignored (*.ini).
+# NEVER commit a real password or secret to this repository.
+
+[server]
+port            = 8080
+bind            = 0.0.0.0
+keys_parent_dir = /data/writefreely
+
+[database]
+type     = mysql
+host     = mariadb-writefreely
+port     = 3306
+username = writefreely
+password = CHANGE_ME
+database = writefreely
+tls      = false
+
+[app]
+site_name         = theATL Writes
+host              = https://write.theatl.social
+single_user       = false
+# open_registration MUST stay true: it is what registers POST /api/auth/signup,
+# which the member site uses to provision accounts. Public signup is blocked at
+# haproxy, NOT by this flag. See FORK.md before changing it.
+open_registration = true
+open_deletion     = false
+min_username_len  = 3
+# Fallback only. Real per-user limits live in users.max_blogs and are set by
+# the member site. See FORK.md.
+max_blogs         = 1
+federation        = true
+local_timeline    = true
+private           = false
+user_invites      =
+disable_password_auth = false
+update_checks     = false

@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [theatl-main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    services:
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_ROOT_PASSWORD: ci_root_pw
+          MARIADB_DATABASE: writefreely
+          MARIADB_USER: writefreely
+          MARIADB_PASSWORD: ci_pw
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s --health-timeout=5s --health-retries=10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Build
+        run: make build
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Load schema
+        run: mysql -h 127.0.0.1 -u writefreely -pci_pw writefreely < schema.sql
+
+      - name: Test
+        env:
+          TEST_MYSQL: '1'
+          WF_USER: writefreely
+          WF_PASSWORD: ci_pw
+          WF_DB: writefreely
+          WF_HOST: 127.0.0.1
+        run: go test -tags='netgo sqlite' ./... -v
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: TruffleHog (verified and unverified)
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          extra_args: --debug

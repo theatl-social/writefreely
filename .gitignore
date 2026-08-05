@@ -8,5 +8,6 @@ build
 tmp
 *.ini
 *.db
+.env*
 
 bindata.go
