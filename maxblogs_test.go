@@ -3,8 +3,11 @@ package writefreely
 import (
 	"database/sql"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
 	"github.com/writeas/impart"
 	"github.com/writefreely/writefreely/config"
@@ -254,4 +257,97 @@ func TestCheckBlogLimitN(t *testing.T) {
 		// The single-blog wrapper keeps its original meaning.
 		assert.NoError(t, app.checkBlogLimit(uid))
 	})
+}
+
+func TestSetUserMaxBlogs(t *testing.T) {
+	if !runMySQLTests() {
+		t.Skip("skipping mysql tests")
+	}
+	withTestDB(t, func(db *sql.DB) {
+		ds := &datastore{DB: db, driverName: driverMySQL}
+		assert.NoError(t, ds.ensureMaxBlogsColumn())
+
+		_, err := ds.Exec(
+			"INSERT INTO users (username, password, email, created) VALUES (?, ?, ?, NOW())",
+			"setuser", "x", nil)
+		assert.NoError(t, err)
+
+		assert.NoError(t, ds.SetUserMaxBlogs("setuser", 15))
+
+		var got sql.NullInt64
+		assert.NoError(t, ds.QueryRow("SELECT max_blogs FROM users WHERE username = ?", "setuser").Scan(&got))
+		assert.True(t, got.Valid)
+		assert.Equal(t, int64(15), got.Int64)
+
+		// Setting the same value again must still succeed. MySQL reports zero
+		// affected rows for a no-op UPDATE, so an implementation keying off
+		// RowsAffected would wrongly report the user as missing.
+		assert.NoError(t, ds.SetUserMaxBlogs("setuser", 15))
+
+		assert.Equal(t, ErrUserNotFound, ds.SetUserMaxBlogs("nobody", 3))
+	})
+}
+
+func TestHandleSetMaxBlogsAuth(t *testing.T) {
+	if !runMySQLTests() {
+		t.Skip("skipping mysql tests")
+	}
+	withTestDB(t, func(db *sql.DB) {
+		ds := &datastore{DB: db, driverName: driverMySQL}
+		assert.NoError(t, ds.ensureMaxBlogsColumn())
+		_, err := ds.Exec(
+			"INSERT INTO users (username, password, email, created) VALUES (?, ?, ?, NOW())",
+			"authuser", "x", nil)
+		assert.NoError(t, err)
+
+		app := &App{db: ds, cfg: config.New()}
+		secret := "0123456789abcdef0123456789abcdef"
+		t.Setenv("WRITEFREELY_API_SECRET", secret)
+
+		router := mux.NewRouter()
+		router.HandleFunc("/api/internal/user/{username}/max-blogs",
+			handleSetMaxBlogs(app)).Methods("POST")
+
+		post := func(user, sec string, body string) int {
+			r := httptest.NewRequest("POST",
+				"/api/internal/user/"+user+"/max-blogs", strings.NewReader(body))
+			if sec != "" {
+				r.Header.Set("X-WriteFreely-Secret", sec)
+			}
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, r)
+			return w.Code
+		}
+
+		assert.Equal(t, http.StatusUnauthorized, post("authuser", "", `{"max_blogs":3}`),
+			"missing secret must be rejected")
+		assert.Equal(t, http.StatusUnauthorized, post("authuser", "wrong-but-32-chars-long-xxxxxxxx", `{"max_blogs":3}`),
+			"wrong secret must be rejected")
+		assert.Equal(t, http.StatusOK, post("authuser", secret, `{"max_blogs":3}`))
+		assert.Equal(t, http.StatusNotFound, post("nobody", secret, `{"max_blogs":3}`))
+		assert.Equal(t, http.StatusBadRequest, post("authuser", secret, `not json`))
+		assert.Equal(t, http.StatusBadRequest, post("authuser", secret, `{"max_blogs":-1}`))
+
+		var got sql.NullInt64
+		assert.NoError(t, ds.QueryRow("SELECT max_blogs FROM users WHERE username = ?", "authuser").Scan(&got))
+		assert.Equal(t, int64(3), got.Int64)
+	})
+}
+
+func TestHandleSetMaxBlogsRefusesWeakSecret(t *testing.T) {
+	app := &App{cfg: config.New()}
+	t.Setenv("WRITEFREELY_API_SECRET", "tooshort")
+
+	router := mux.NewRouter()
+	router.HandleFunc("/api/internal/user/{username}/max-blogs",
+		handleSetMaxBlogs(app)).Methods("POST")
+
+	r := httptest.NewRequest("POST", "/api/internal/user/x/max-blogs",
+		strings.NewReader(`{"max_blogs":3}`))
+	r.Header.Set("X-WriteFreely-Secret", "tooshort")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, r)
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code,
+		"a short secret must fail closed, never authorise")
 }
