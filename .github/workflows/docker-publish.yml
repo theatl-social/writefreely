@@ -34,7 +34,7 @@ jobs:
         # distinct per commit, and self-correcting across upstream merges.
         run: echo "value=$(git describe --tags --match 'v*' --abbrev=7 | sed 's/^v//')" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
