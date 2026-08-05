@@ -57,6 +57,23 @@ jobs:
       - name: Load schema
         run: mysql -h 127.0.0.1 -u writefreely -pci_pw writefreely < schema.sql
 
+      # Required, not optional. Upstream's withTestDB helper calls
+      # newTestDatabase, which does `CREATE DATABASE writefreely<uuid>` per test
+      # and copies table definitions across from the reference database
+      # (main_test.go:100-140). The MariaDB image's MARIADB_USER grant covers
+      # only the one named database, so without a global grant every test using
+      # that harness dies with `Error 1044 (42000): Access denied` — and then
+      # panics, because main_test.go:89 uses assert.NoError rather than
+      # require.NoError and carries on with a nil *sql.DB.
+      #
+      # Our own tests in Tasks 2-5 all use withTestDB, so this is a hard
+      # dependency for the rest of the plan, not just for upstream's tests. The
+      # CI database is ephemeral and discarded with the runner.
+      - name: Grant the test user database-creation privileges
+        run: |
+          mysql -h 127.0.0.1 -u root -pci_root_pw \
+            -e "GRANT ALL PRIVILEGES ON *.* TO 'writefreely'@'%'; FLUSH PRIVILEGES;"
+
       - name: Test
         env:
           TEST_MYSQL: '1'
