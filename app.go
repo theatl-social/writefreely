@@ -8,6 +8,11 @@
  * in the LICENSE file in this source code package.
  */
 
+/*
+ * Modified 2026 by theATL.social: added a per-user blog limit.
+ * See FORK.md for the full list of changes.
+ */
+
 package writefreely
 
 import (
@@ -615,6 +620,11 @@ func ConnectToDatabase(app *App) error {
 			log.Info("Enabling compatibility for MySQL v5.x")
 			app.db.useSpencerRegex = true
 		}
+	}
+
+	// theATL fork: ensure the per-user blog limit column exists. See FORK.md.
+	if err := app.db.ensureMaxBlogsColumn(); err != nil {
+		return fmt.Errorf("ensure max_blogs column: %s", err)
 	}
 
 	return nil
