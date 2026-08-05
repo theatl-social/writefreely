@@ -13,7 +13,9 @@ package writefreely
 import (
 	"database/sql"
 	"fmt"
+	"net/http"
 
+	"github.com/writeas/impart"
 	"github.com/writeas/web-core/log"
 	"github.com/writefreely/writefreely/config"
 )
@@ -81,4 +83,39 @@ func effectiveMaxBlogs(cfg *config.Config, perUser sql.NullInt64) int {
 		return int(perUser.Int64)
 	}
 	return cfg.App.MaxBlogs
+}
+
+// checkBlogLimit returns an error if the user has reached their blog allowance.
+// A limit of zero or less means unlimited.
+//
+// This is the enforcement upstream lacks: config.AppCfg.CanCreateBlogs exists but
+// its only caller is account.go, where it merely hides a button in the web UI.
+// newCollection never consulted any limit, so POST /api/collections was unbounded.
+func (app *App) checkBlogLimit(userID int64) error {
+	perUser, err := app.db.GetUserMaxBlogs(userID)
+	if err != nil {
+		log.Error("max_blogs: lookup failed for user %d: %v", userID, err)
+		return ErrInternalGeneral
+	}
+
+	limit := effectiveMaxBlogs(app.cfg, perUser)
+	if limit <= 0 {
+		return nil
+	}
+
+	count, err := app.db.GetUserCollectionCount(userID)
+	if err != nil {
+		log.Error("max_blogs: count failed for user %d: %v", userID, err)
+		return ErrInternalGeneral
+	}
+
+	// limit is guaranteed > 0 here, so it is safe to convert to uint64 for the
+	// comparison against count without a negative value wrapping around.
+	if count >= uint64(limit) {
+		return impart.HTTPError{
+			Status:  http.StatusForbidden,
+			Message: "You've reached the number of blogs included with your membership.",
+		}
+	}
+	return nil
 }

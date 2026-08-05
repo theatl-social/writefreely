@@ -8,6 +8,11 @@
  * in the LICENSE file in this source code package.
  */
 
+/*
+ * Modified 2026 by theATL.social: enforce a per-user blog limit in newCollection.
+ * See FORK.md for the full list of changes.
+ */
+
 package writefreely
 
 import (
@@ -490,6 +495,11 @@ func newCollection(app *App, w http.ResponseWriter, r *http.Request) error {
 	}
 	if silenced {
 		return ErrUserSilenced
+	}
+
+	// theATL fork: enforce the user's blog allowance. See FORK.md.
+	if err := app.checkBlogLimit(userID); err != nil {
+		return err
 	}
 
 	if !author.IsValidUsername(app.cfg, c.Alias) {

@@ -2,9 +2,11 @@ package writefreely
 
 import (
 	"database/sql"
+	"net/http"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/writeas/impart"
 	"github.com/writefreely/writefreely/config"
 )
 
@@ -128,5 +130,58 @@ func TestGetUserMaxBlogs(t *testing.T) {
 		got, err = ds.GetUserMaxBlogs(999999)
 		assert.Equal(t, ErrUserNotFound, err)
 		assert.False(t, got.Valid)
+	})
+}
+
+func TestCheckBlogLimit(t *testing.T) {
+	if !runMySQLTests() {
+		t.Skip("skipping mysql tests")
+	}
+	withTestDB(t, func(db *sql.DB) {
+		ds := &datastore{DB: db, driverName: driverMySQL}
+		assert.NoError(t, ds.ensureMaxBlogsColumn())
+
+		cfg := config.New()
+		cfg.App.MaxBlogs = 1
+		app := &App{db: ds, cfg: cfg}
+
+		res, err := ds.Exec(
+			"INSERT INTO users (username, password, email, created) VALUES (?, ?, ?, NOW())",
+			"capuser", "x", nil)
+		assert.NoError(t, err)
+		uid, _ := res.LastInsertId()
+
+		addBlog := func(alias string) {
+			_, err := ds.Exec(
+				"INSERT INTO collections (alias, title, description, privacy, owner_id, view_count) VALUES (?, ?, '', 1, ?, 0)",
+				alias, alias, uid)
+			assert.NoError(t, err)
+		}
+
+		// Ponce: 3 blogs.
+		_, err = ds.Exec("UPDATE users SET max_blogs = ? WHERE id = ?", 3, uid)
+		assert.NoError(t, err)
+
+		assert.NoError(t, app.checkBlogLimit(uid), "0 of 3 should be allowed")
+		addBlog("cap-a")
+		addBlog("cap-b")
+		assert.NoError(t, app.checkBlogLimit(uid), "2 of 3 should be allowed")
+
+		addBlog("cap-c")
+		err = app.checkBlogLimit(uid)
+		assert.Error(t, err, "3 of 3 must be refused")
+		httpErr, ok := err.(impart.HTTPError)
+		assert.True(t, ok, "expected impart.HTTPError, got %T", err)
+		assert.Equal(t, http.StatusForbidden, httpErr.Status)
+
+		// Zero means unlimited, even when already over the old cap.
+		_, err = ds.Exec("UPDATE users SET max_blogs = ? WHERE id = ?", 0, uid)
+		assert.NoError(t, err)
+		assert.NoError(t, app.checkBlogLimit(uid), "0 means unlimited")
+
+		// NULL falls back to the config value of 1, and the user has 3.
+		_, err = ds.Exec("UPDATE users SET max_blogs = NULL WHERE id = ?", uid)
+		assert.NoError(t, err)
+		assert.Error(t, app.checkBlogLimit(uid), "NULL should fall back to cfg.App.MaxBlogs = 1")
 	})
 }
