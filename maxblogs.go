@@ -11,14 +11,10 @@
 package writefreely
 
 import (
-	"crypto/subtle"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 
-	"github.com/gorilla/mux"
 	"github.com/writeas/impart"
 	"github.com/writeas/web-core/log"
 	"github.com/writefreely/writefreely/config"
@@ -162,72 +158,4 @@ func countRequestedNewBlogs(claims *[]ClaimPostRequest, collAlias string) int {
 		}
 	}
 	return len(seen)
-}
-
-// SetUserMaxBlogs sets a user's blog allowance by username.
-//
-// The row is located with a SELECT before the UPDATE rather than relying on
-// RowsAffected: MySQL reports zero affected rows when an UPDATE sets a column to
-// the value it already holds, which would make a legitimate no-op look like a
-// missing user.
-func (db *datastore) SetUserMaxBlogs(username string, max int) error {
-	var id int64
-	err := db.QueryRow("SELECT id FROM users WHERE username = ?", username).Scan(&id)
-	if err == sql.ErrNoRows {
-		return ErrUserNotFound
-	} else if err != nil {
-		return err
-	}
-
-	_, err = db.Exec("UPDATE users SET max_blogs = ? WHERE id = ?", max, id)
-	return err
-}
-
-// handleSetMaxBlogs serves POST /api/internal/user/{username}/max-blogs.
-//
-// Authorisation is a shared secret in X-WriteFreely-Secret, checked in constant
-// time. This route is ALSO denied at the reverse proxy; the secret is the second
-// layer, present because this fork is public and therefore documents the route's
-// existence to anyone who reads it.
-func handleSetMaxBlogs(app *App) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		secret := os.Getenv("WRITEFREELY_API_SECRET")
-		if len(secret) < 32 {
-			log.Error("max_blogs: WRITEFREELY_API_SECRET unset or under 32 chars; refusing request")
-			w.WriteHeader(http.StatusServiceUnavailable)
-			return
-		}
-
-		provided := r.Header.Get("X-WriteFreely-Secret")
-		if subtle.ConstantTimeCompare([]byte(provided), []byte(secret)) != 1 {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-
-		var body struct {
-			MaxBlogs int `json:"max_blogs"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		if body.MaxBlogs < 0 {
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-
-		username := mux.Vars(r)["username"]
-		if err := app.db.SetUserMaxBlogs(username, body.MaxBlogs); err != nil {
-			if err == ErrUserNotFound {
-				w.WriteHeader(http.StatusNotFound)
-				return
-			}
-			log.Error("max_blogs: set failed for %s: %v", username, err)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-
-		log.Info("max_blogs: set %s to %d", username, body.MaxBlogs)
-		w.WriteHeader(http.StatusOK)
-	}
 }

@@ -328,6 +328,20 @@ func TestHandleSetMaxBlogsAuth(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, post("authuser", secret, `not json`))
 		assert.Equal(t, http.StatusBadRequest, post("authuser", secret, `{"max_blogs":-1}`))
 
+		// An absent, null, zero or misspelled max_blogs must be a 400, never a
+		// silent success. 0 means UNLIMITED to effectiveMaxBlogs, so accepting
+		// any of these would remove the member's cap and return 200.
+		for _, bad := range []string{`{}`, `{"max_blogs":null}`, `{"max_blogs":0}`, `{"maxblogs":5}`, `{"max_blogs":99999}`} {
+			assert.Equal(t, http.StatusBadRequest, post("authuser", secret, bad),
+				"payload %s must be refused", bad)
+		}
+
+		// ...and none of them may have changed the stored value.
+		var after sql.NullInt64
+		assert.NoError(t, ds.QueryRow("SELECT max_blogs FROM users WHERE username = ?", "authuser").Scan(&after))
+		assert.True(t, after.Valid)
+		assert.Equal(t, int64(3), after.Int64, "a refused payload must not modify the allowance")
+
 		var got sql.NullInt64
 		assert.NoError(t, ds.QueryRow("SELECT max_blogs FROM users WHERE username = ?", "authuser").Scan(&got))
 		assert.Equal(t, int64(3), got.Int64)
@@ -350,4 +364,23 @@ func TestHandleSetMaxBlogsRefusesWeakSecret(t *testing.T) {
 
 	assert.Equal(t, http.StatusServiceUnavailable, w.Code,
 		"a short secret must fail closed, never authorise")
+}
+
+func TestHandleSetMaxBlogsRefusesUnsetSecret(t *testing.T) {
+	app := &App{cfg: config.New()}
+	// Genuinely unset, not merely short — this is the state a misconfigured
+	// deploy is actually in, and it must not be treated as permission.
+	t.Setenv("WRITEFREELY_API_SECRET", "")
+
+	router := mux.NewRouter()
+	router.HandleFunc("/api/internal/user/{username}/max-blogs",
+		handleSetMaxBlogs(app)).Methods("POST")
+
+	r := httptest.NewRequest("POST", "/api/internal/user/x/max-blogs",
+		strings.NewReader(`{"max_blogs":3}`))
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, r)
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code,
+		"an unset secret must fail closed")
 }
