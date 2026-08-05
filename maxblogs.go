@@ -85,13 +85,21 @@ func effectiveMaxBlogs(cfg *config.Config, perUser sql.NullInt64) int {
 	return cfg.App.MaxBlogs
 }
 
-// checkBlogLimit returns an error if the user has reached their blog allowance.
-// A limit of zero or less means unlimited.
+// checkBlogLimit reports whether the user may create one more blog.
+func (app *App) checkBlogLimit(userID int64) error {
+	return app.checkBlogLimitN(userID, 1)
+}
+
+// checkBlogLimitN reports whether the user may create `wanted` more blogs.
 //
 // This is the enforcement upstream lacks: config.AppCfg.CanCreateBlogs exists but
 // its only caller is account.go, where it merely hides a button in the web UI.
-// newCollection never consulted any limit, so POST /api/collections was unbounded.
-func (app *App) checkBlogLimit(userID int64) error {
+// Neither newCollection nor the /posts/claim path consulted any limit.
+func (app *App) checkBlogLimitN(userID int64, wanted int) error {
+	if wanted <= 0 {
+		return nil
+	}
+
 	perUser, err := app.db.GetUserMaxBlogs(userID)
 	if err != nil {
 		log.Error("max_blogs: lookup failed for user %d: %v", userID, err)
@@ -109,13 +117,45 @@ func (app *App) checkBlogLimit(userID int64) error {
 		return ErrInternalGeneral
 	}
 
-	// limit is guaranteed > 0 here, so it is safe to convert to uint64 for the
-	// comparison against count without a negative value wrapping around.
-	if count >= uint64(limit) {
+	// limit is guaranteed > 0 here, so converting it to uint64 cannot wrap.
+	if count+uint64(wanted) > uint64(limit) {
 		return impart.HTTPError{
 			Status:  http.StatusForbidden,
 			Message: "You've reached the number of blogs included with your membership.",
 		}
 	}
 	return nil
+}
+
+// countRequestedNewBlogs reports how many distinct blogs a claim-posts payload
+// asks to create.
+//
+// POST /api/posts/claim accepts create_collection per post and reaches
+// db.CreateCollection directly (database.go:1756), bypassing newCollection and
+// its limit check entirely — so the allowance has to be enforced on this path
+// too. Distinct aliases are counted because one payload may ask for several.
+//
+// Aliases that already exist are counted as well, which is deliberately
+// conservative: CreateCollection would reject them anyway, and over-counting
+// refuses slightly early rather than letting a request slip past the cap.
+func countRequestedNewBlogs(claims *[]ClaimPostRequest, collAlias string) int {
+	if claims == nil {
+		return 0
+	}
+	seen := make(map[string]bool)
+	for _, c := range *claims {
+		if !c.CreateCollection {
+			continue
+		}
+		// ClaimPosts uses the URL alias when the route supplies one, and the
+		// per-post alias otherwise (database.go:1743-1748).
+		alias := c.CollectionAlias
+		if collAlias != "" {
+			alias = collAlias
+		}
+		if alias != "" {
+			seen[alias] = true
+		}
+	}
+	return len(seen)
 }

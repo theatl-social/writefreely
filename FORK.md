@@ -15,6 +15,7 @@ per-user limit so membership tiers map to real blog allowances.
 |---|---|
 | `max_blogs` column on `users`, added idempotently at boot | `maxblogs.go`, called from `app.go` `ConnectToDatabase` |
 | Limit enforced when a blog is created | `maxblogs.go` `checkBlogLimit`, called from `collections.go` `newCollection` |
+| Limit also enforced on the claim-posts path | `maxblogs.go` `countRequestedNewBlogs` + `checkBlogLimitN`, called from `posts.go` `addPost` |
 | `POST /api/internal/user/{username}/max-blogs` to set a user's limit | `maxblogs.go`, registered in `routes.go` |
 
 Everything else is upstream. The internal endpoint requires the
@@ -31,9 +32,9 @@ the merge surface entirely.
 
 ## Merge policy
 
-Only `app.go`, `collections.go`, and `routes.go` are modified, by one line or a short
-block each, all marked with `theATL fork:` comments. Merge upstream releases onto
-`theatl-main`; conflicts should be confined to those three files.
+Only `app.go`, `collections.go`, `routes.go`, and `posts.go` are modified, by one
+line or a short block each, all marked with `theATL fork:` comments. Merge upstream
+releases onto `theatl-main`; conflicts should be confined to those four files.
 
 ## Known upstream test failures
 

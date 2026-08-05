@@ -8,6 +8,11 @@
  * in the LICENSE file in this source code package.
  */
 
+/*
+ * Modified 2026 by theATL.social: enforce a per-user blog limit on the
+ * claim-posts path. See FORK.md for the full list of changes.
+ */
+
 package writefreely
 
 import (
@@ -985,6 +990,15 @@ func addPost(app *App, w http.ResponseWriter, r *http.Request) error {
 
 	vars := mux.Vars(r)
 	collAlias := vars["alias"]
+
+	// theATL fork: this endpoint can create blogs via `create_collection`, which
+	// reaches db.CreateCollection directly and never passes through
+	// newCollection's limit check. Enforce the allowance here too. See FORK.md.
+	if n := countRequestedNewBlogs(claims, collAlias); n > 0 {
+		if err := app.checkBlogLimitN(ownerID, n); err != nil {
+			return err
+		}
+	}
 
 	// Update all given posts
 	res, err := app.db.ClaimPosts(app.cfg, ownerID, collAlias, claims)

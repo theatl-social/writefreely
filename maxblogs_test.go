@@ -185,3 +185,73 @@ func TestCheckBlogLimit(t *testing.T) {
 		assert.Error(t, app.checkBlogLimit(uid), "NULL should fall back to cfg.App.MaxBlogs = 1")
 	})
 }
+
+func TestCountRequestedNewBlogs(t *testing.T) {
+	mk := func(alias string, create bool) ClaimPostRequest {
+		return ClaimPostRequest{CollectionAlias: alias, CreateCollection: create}
+	}
+
+	tests := []struct {
+		name      string
+		claims    []ClaimPostRequest
+		collAlias string
+		want      int
+	}{
+		{"nil-safe", nil, "", 0},
+		{"no creates", []ClaimPostRequest{mk("a", false), mk("b", false)}, "", 0},
+		{"one create", []ClaimPostRequest{mk("a", true)}, "", 1},
+		{"three distinct creates", []ClaimPostRequest{mk("a", true), mk("b", true), mk("c", true)}, "", 3},
+		{"duplicates count once", []ClaimPostRequest{mk("a", true), mk("a", true)}, "", 1},
+		{"create with empty alias is not a blog", []ClaimPostRequest{mk("", true)}, "", 0},
+		{"url alias wins over per-post alias", []ClaimPostRequest{mk("a", true), mk("b", true)}, "fromurl", 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var c *[]ClaimPostRequest
+			if tc.claims != nil {
+				c = &tc.claims
+			}
+			assert.Equal(t, tc.want, countRequestedNewBlogs(c, tc.collAlias))
+		})
+	}
+}
+
+func TestCheckBlogLimitN(t *testing.T) {
+	if !runMySQLTests() {
+		t.Skip("skipping mysql tests")
+	}
+	withTestDB(t, func(db *sql.DB) {
+		ds := &datastore{DB: db, driverName: driverMySQL}
+		assert.NoError(t, ds.ensureMaxBlogsColumn())
+
+		cfg := config.New()
+		cfg.App.MaxBlogs = 1
+		app := &App{db: ds, cfg: cfg}
+
+		res, err := ds.Exec(
+			"INSERT INTO users (username, password, email, created) VALUES (?, ?, ?, NOW())",
+			"bulkuser", "x", nil)
+		assert.NoError(t, err)
+		uid, _ := res.LastInsertId()
+
+		_, err = ds.Exec("UPDATE users SET max_blogs = ? WHERE id = ?", 3, uid)
+		assert.NoError(t, err)
+
+		// Nothing created yet: room for exactly three, not four.
+		assert.NoError(t, app.checkBlogLimitN(uid, 3), "3 of 3 at once must be allowed")
+		assert.Error(t, app.checkBlogLimitN(uid, 4), "4 of 3 at once must be refused")
+
+		_, err = ds.Exec(
+			"INSERT INTO collections (alias, title, description, privacy, owner_id, view_count) VALUES (?, ?, '', 1, ?, 0)",
+			"bulk-a", "bulk-a", uid)
+		assert.NoError(t, err)
+
+		// One used: room for two more, not three.
+		assert.NoError(t, app.checkBlogLimitN(uid, 2))
+		assert.Error(t, app.checkBlogLimitN(uid, 3),
+			"a bulk request must not be able to exceed the cap in one call")
+
+		// The single-blog wrapper keeps its original meaning.
+		assert.NoError(t, app.checkBlogLimit(uid))
+	})
+}
