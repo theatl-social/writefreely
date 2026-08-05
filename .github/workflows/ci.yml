@@ -86,9 +86,14 @@ jobs:
           mysql -h 127.0.0.1 -u root -pci_root_pw \
             -e "GRANT ALL PRIVILEGES ON *.* TO 'writefreely'@'%'; FLUSH PRIVILEGES;"
 
-      # Two upstream tests are genuinely broken at v0.17.1, independent of
-      # database schema or privileges, and are skipped by name rather than
-      # blanket-disabled so every other upstream test keeps gating our changes:
+      # Exactly two upstream SUBTESTS are genuinely broken at v0.17.1, independent
+      # of database schema or privileges, and are skipped by their fully
+      # slash-qualified subtest path rather than at the parent-test level, so
+      # every other subtest (and every other upstream test) keeps gating our
+      # changes. Without the "/subtest" qualifier, `-skip` matches the parent
+      # test name and drops every subtest beneath it — e.g. TestUpdatesRoundTrip
+      # has five subtests (New Updates Cache, Release URL, Check Now, Are
+      # Available, Latest Version) and only "Release URL" is broken.
       #
       # - TestViewOauthCallback/success (oauth_test.go): the test's mock config
       #   (built via config.New(), oauth_test.go:79-97) never sets
@@ -97,18 +102,22 @@ jobs:
       #   and returns `/login` as a redirect-encoded error, which the test's
       #   assert.NoError flags as unexpected. Pre-existing at v0.17.1;
       #   oauth.go/oauth_test.go are outside the three-file merge-surface budget.
+      #   (This test has only the one subtest today; qualified anyway so it
+      #   stays correct if upstream adds more.)
       #
       # - TestUpdatesRoundTrip/Release_URL (updates_test.go): newUpdatesCache
       #   (updates.go:98-105) launches its version-check network call in
       #   `go cache.CheckNow()` with no synchronization, and the "Release URL"
-      #   subtest (updates_test.go:26-30) reads cache.latestVersion immediately
-      #   after construction — a race, not a network-outage symptom (reproduces
-      #   identically whether or not the network call itself succeeds).
-      #   Pre-existing at v0.17.1; updates.go/updates_test.go are outside the
-      #   three-file merge-surface budget.
+      #   subtest (updates_test.go:26-30, named "Release_URL" in the test path —
+      #   Go replaces spaces with underscores) reads cache.latestVersion
+      #   immediately after construction — a race, not a network-outage symptom
+      #   (reproduces identically whether or not the network call itself
+      #   succeeds). Pre-existing at v0.17.1; updates.go/updates_test.go are
+      #   outside the three-file merge-surface budget. The other four
+      #   TestUpdatesRoundTrip subtests are unaffected and must keep running.
       #
       # Revisit both on every upstream merge; delete the corresponding -skip
-      # entry the moment a release fixes the underlying test.
+      # entry the moment a release fixes the underlying subtest.
       - name: Test
         env:
           TEST_MYSQL: '1'
@@ -116,7 +125,7 @@ jobs:
           WF_PASSWORD: ci_pw
           WF_DB: writefreely
           WF_HOST: 127.0.0.1
-        run: go test -vet=off -tags='netgo sqlite' -skip 'TestViewOauthCallback|TestUpdatesRoundTrip' ./... -v
+        run: go test -vet=off -tags='netgo sqlite' -skip 'TestViewOauthCallback/success|TestUpdatesRoundTrip/Release_URL' ./... -v
 
   secret-scan:
     runs-on: ubuntu-latest
@@ -125,7 +134,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: TruffleHog (verified and unverified)
-        uses: trufflesecurity/trufflehog@main
+        uses: trufflesecurity/trufflehog@v3.96.0
         with:
           path: ./
           extra_args: --debug

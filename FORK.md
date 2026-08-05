@@ -37,16 +37,22 @@ block each, all marked with `theATL fork:` comments. Merge upstream releases ont
 
 ## Known upstream test failures
 
-CI skips these two tests by name (see `.github/workflows/ci.yml`'s `Test` step).
-Both are pre-existing at v0.17.1, in files outside the merge-surface budget above,
-and unrelated to anything in this fork:
+CI skips exactly these two **subtests** by their fully slash-qualified path
+(see `.github/workflows/ci.yml`'s `Test` step — the `/subtest` qualifier matters:
+without it, `-skip` matches the parent test name and drops every subtest beneath
+it, e.g. all five of `TestUpdatesRoundTrip`'s subtests instead of just the one
+that's broken). Both are pre-existing at v0.17.1, in files outside the
+merge-surface budget above, and unrelated to anything in this fork:
 
 - `TestViewOauthCallback/success` (`oauth_test.go`) — the test's mock config never
   sets `App.OpenRegistration`, so `oauth.go`'s registration-blocked branch fires
-  and returns a redirect the test doesn't expect.
+  and returns a redirect the test doesn't expect. (Only subtest on this test
+  today; qualified anyway so it stays correct if upstream adds more.)
 - `TestUpdatesRoundTrip/Release_URL` (`updates_test.go`) — a race: the cache's
-  version-check network call runs in an unsynchronized goroutine, and the subtest
-  reads the result before it's populated.
+  version-check network call runs in an unsynchronized goroutine, and the
+  `Release_URL` subtest reads the result before it's populated. The other four
+  subtests (`New_Updates_Cache`, `Check_Now`, `Are_Available`, `Latest_Version`)
+  are unaffected and run normally.
 
 Revisit both on every upstream merge and delete the corresponding `-skip` entry
-the moment a release fixes the underlying test.
+the moment a release fixes the underlying subtest.
