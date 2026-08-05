@@ -12,6 +12,7 @@ package writefreely
 
 import (
 	"database/sql"
+	"fmt"
 
 	"github.com/writeas/web-core/log"
 )
@@ -35,11 +36,21 @@ func (db *datastore) ensureMaxBlogsColumn() error {
 		return nil
 	}
 
-	// It does not — but distinguish "no column" from "no table".
-	var probe int
-	if tblErr := db.QueryRow("SELECT 1 FROM users LIMIT 1").Scan(&probe); tblErr != nil && tblErr != sql.ErrNoRows {
+	// The column is absent — but the identical error appears when `users` itself
+	// is missing, which is the normal state on a fresh deploy before --init-db
+	// has run. Distinguish the two EXPLICITLY rather than inferring: treating any
+	// error as "table missing" would swallow a permission failure, a lock-wait
+	// timeout or a dropped connection, log a false reason, and leave max_blogs
+	// permanently unadded with nothing visible to an operator.
+	//
+	// SHOW TABLES LIKE is the same technique migrations.go:135 uses for this.
+	var name string
+	switch tblErr := db.QueryRow("SHOW TABLES LIKE 'users'").Scan(&name); {
+	case tblErr == sql.ErrNoRows:
 		log.Info("max_blogs: users table not present yet; skipping. Run `writefreely --init-db`, then restart.")
 		return nil
+	case tblErr != nil:
+		return fmt.Errorf("checking for users table: %w", tblErr)
 	}
 
 	log.Info("max_blogs: adding users.max_blogs column...")

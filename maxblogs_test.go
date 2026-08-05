@@ -43,3 +43,20 @@ func TestEnsureMaxBlogsColumnNoUsersTable(t *testing.T) {
 		assert.NoError(t, ds.ensureMaxBlogsColumn())
 	})
 }
+
+func TestEnsureMaxBlogsColumnPropagatesRealErrors(t *testing.T) {
+	if !runMySQLTests() {
+		t.Skip("skipping mysql tests")
+	}
+	withTestDB(t, func(db *sql.DB) {
+		ds := &datastore{DB: db, driverName: driverMySQL}
+
+		// Close the connection so the probes fail for a reason that is NOT
+		// "the users table does not exist yet". A guard that infers
+		// table-absence from any error would swallow this and return nil.
+		assert.NoError(t, db.Close())
+
+		assert.Error(t, ds.ensureMaxBlogsColumn(),
+			"a connection failure must not be reported as 'table missing'")
+	})
+}
