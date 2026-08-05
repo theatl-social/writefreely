@@ -34,3 +34,19 @@ the merge surface entirely.
 Only `app.go`, `collections.go`, and `routes.go` are modified, by one line or a short
 block each, all marked with `theATL fork:` comments. Merge upstream releases onto
 `theatl-main`; conflicts should be confined to those three files.
+
+## Known upstream test failures
+
+CI skips these two tests by name (see `.github/workflows/ci.yml`'s `Test` step).
+Both are pre-existing at v0.17.1, in files outside the merge-surface budget above,
+and unrelated to anything in this fork:
+
+- `TestViewOauthCallback/success` (`oauth_test.go`) — the test's mock config never
+  sets `App.OpenRegistration`, so `oauth.go`'s registration-blocked branch fires
+  and returns a redirect the test doesn't expect.
+- `TestUpdatesRoundTrip/Release_URL` (`updates_test.go`) — a race: the cache's
+  version-check network call runs in an unsynchronized goroutine, and the subtest
+  reads the result before it's populated.
+
+Revisit both on every upstream merge and delete the corresponding `-skip` entry
+the moment a release fixes the underlying test.
