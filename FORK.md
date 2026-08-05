@@ -57,3 +57,19 @@ merge-surface budget above, and unrelated to anything in this fork:
 
 Revisit both on every upstream merge and delete the corresponding `-skip` entry
 the moment a release fixes the underlying subtest.
+
+## CI divergence
+
+`.github/workflows/ci.yml` is ours; upstream has no Go CI at all.
+
+`.github/workflows/docker-publish.yml` **replaces** upstream's wholesale. Upstream's
+built multi-arch (amd64 + arm64, via QEMU and buildx) and published `:latest` on
+`main`/`develop`. Ours publishes a single immutable `<version>-<n>-g<sha>` tag
+derived from `git describe`, amd64 only, on pushes to `theatl-main`.
+
+Two reasons: `:latest` is banned across this fleet because it makes a running
+container unreconstructable, and the only consumer is one x86_64 OVH host, so the
+arm64 half of the matrix was build time spent on an artifact nobody pulls.
+
+If a future upstream merge conflicts on this file, take ours — but re-check
+whether arm64 has become necessary before assuming that still holds.

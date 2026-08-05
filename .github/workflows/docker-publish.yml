@@ -15,10 +15,19 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # git describe needs tags, and the default shallow clone fetches none.
+          fetch-depth: 0
 
       - name: Compute tag
         id: tag
-        run: echo "value=0.17.1-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+        # Derived from the nearest upstream v* tag rather than hardcoded. A
+        # hardcoded "0.17.1-" prefix would keep claiming 0.17.1 forever: after a
+        # merge to v0.18.0 every image would carry a tag that misnames its own
+        # upstream base, and that tag is what the deployment pins in
+        # ovh/docker-compose.yml. Yields e.g. 0.17.1-14-ga668231 — immutable,
+        # distinct per commit, and self-correcting across upstream merges.
+        run: echo "value=$(git describe --tags --match 'v*' --abbrev=7 | sed 's/^v//')" >> "$GITHUB_OUTPUT"
 
       - uses: docker/login-action@v3
         with:
