@@ -111,5 +111,22 @@ func TestGetUserMaxBlogs(t *testing.T) {
 		assert.NoError(t, err)
 		assert.True(t, got.Valid)
 		assert.Equal(t, int64(3), got.Int64)
+
+		// An explicit 0 must survive the round-trip as Valid, not collapse into
+		// "unset". The two mean different things: 0 is "unlimited", NULL is
+		// "fall back to the instance default". Task 4 branches on that.
+		_, err = ds.Exec("UPDATE users SET max_blogs = ? WHERE id = ?", 0, uid)
+		assert.NoError(t, err)
+
+		got, err = ds.GetUserMaxBlogs(uid)
+		assert.NoError(t, err)
+		assert.True(t, got.Valid, "an explicit 0 must read back Valid, not NULL")
+		assert.Equal(t, int64(0), got.Int64)
+
+		// A user that does not exist must be distinguishable from a user with no
+		// limit set — both would otherwise present as an invalid NullInt64.
+		got, err = ds.GetUserMaxBlogs(999999)
+		assert.Equal(t, ErrUserNotFound, err)
+		assert.False(t, got.Valid)
 	})
 }
