@@ -16,8 +16,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # git describe needs tags, and the default shallow clone fetches none.
+          # git describe needs tags. fetch-depth: 0 alone is not sufficient —
+          # actions/checkout still passes --no-tags to the underlying fetch
+          # unless fetch-tags is set explicitly, so a fresh CI checkout has
+          # full history but zero tag refs. Confirmed by a failed run: "fatal:
+          # No names found, cannot describe anything."
           fetch-depth: 0
+          fetch-tags: true
 
       - name: Compute tag
         id: tag
