@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/writefreely/writefreely/config"
 )
 
 func TestEnsureMaxBlogsColumn(t *testing.T) {
@@ -58,5 +59,57 @@ func TestEnsureMaxBlogsColumnPropagatesRealErrors(t *testing.T) {
 
 		assert.Error(t, ds.ensureMaxBlogsColumn(),
 			"a connection failure must not be reported as 'table missing'")
+	})
+}
+
+func TestEffectiveMaxBlogs(t *testing.T) {
+	cfg := config.New()
+	cfg.App.MaxBlogs = 1
+
+	tests := []struct {
+		name    string
+		perUser sql.NullInt64
+		want    int
+	}{
+		{"unset falls back to config", sql.NullInt64{Valid: false}, 1},
+		{"per-user overrides config", sql.NullInt64{Int64: 15, Valid: true}, 15},
+		{"per-user zero means unlimited", sql.NullInt64{Int64: 0, Valid: true}, 0},
+		{"per-user one", sql.NullInt64{Int64: 1, Valid: true}, 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, effectiveMaxBlogs(cfg, tc.perUser))
+		})
+	}
+}
+
+func TestGetUserMaxBlogs(t *testing.T) {
+	if !runMySQLTests() {
+		t.Skip("skipping mysql tests")
+	}
+	withTestDB(t, func(db *sql.DB) {
+		ds := &datastore{DB: db, driverName: driverMySQL}
+		assert.NoError(t, ds.ensureMaxBlogsColumn())
+
+		res, err := ds.Exec(
+			"INSERT INTO users (username, password, email, created) VALUES (?, ?, ?, NOW())",
+			"limituser", "x", nil)
+		assert.NoError(t, err)
+		uid, err := res.LastInsertId()
+		assert.NoError(t, err)
+
+		// Unset by default.
+		got, err := ds.GetUserMaxBlogs(uid)
+		assert.NoError(t, err)
+		assert.False(t, got.Valid)
+
+		// Reads back what was written.
+		_, err = ds.Exec("UPDATE users SET max_blogs = ? WHERE id = ?", 3, uid)
+		assert.NoError(t, err)
+
+		got, err = ds.GetUserMaxBlogs(uid)
+		assert.NoError(t, err)
+		assert.True(t, got.Valid)
+		assert.Equal(t, int64(3), got.Int64)
 	})
 }

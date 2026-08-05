@@ -15,6 +15,7 @@ import (
 	"fmt"
 
 	"github.com/writeas/web-core/log"
+	"github.com/writefreely/writefreely/config"
 )
 
 // ensureMaxBlogsColumn adds users.max_blogs if it is missing.
@@ -59,4 +60,25 @@ func (db *datastore) ensureMaxBlogsColumn() error {
 	}
 	log.Info("max_blogs: column added.")
 	return nil
+}
+
+// GetUserMaxBlogs returns the user's per-user blog limit. An invalid (NULL)
+// result means no explicit limit is set for this user.
+func (db *datastore) GetUserMaxBlogs(userID int64) (sql.NullInt64, error) {
+	var max sql.NullInt64
+	err := db.QueryRow("SELECT max_blogs FROM users WHERE id = ?", userID).Scan(&max)
+	if err == sql.ErrNoRows {
+		return max, ErrUserNotFound
+	}
+	return max, err
+}
+
+// effectiveMaxBlogs resolves the limit that applies to a user: their explicit
+// per-user value if set, otherwise the instance-wide config default. A result
+// of zero or less means unlimited, matching config.AppCfg.CanCreateBlogs.
+func effectiveMaxBlogs(cfg *config.Config, perUser sql.NullInt64) int {
+	if perUser.Valid {
+		return int(perUser.Int64)
+	}
+	return cfg.App.MaxBlogs
 }
