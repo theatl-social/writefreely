@@ -27,9 +27,13 @@ import (
 // ours would collide with the next upstream migration and re-run our ALTER against
 // an existing column. See FORK.md.
 //
-// It is driver-agnostic by probing rather than branching on PRAGMA versus
-// information_schema, and it tolerates an uninitialised database because
-// ConnectToDatabase runs on every serve, including before --init-db has been run.
+// It is MariaDB-specific, not driver-agnostic: "SHOW TABLES LIKE" below is
+// MySQL/MariaDB syntax and has no sqlite equivalent (sqlite uses PRAGMA-based
+// introspection instead). That's an accepted constraint, not an oversight —
+// this fork's only deployment target is MariaDB (config.ini.example hardcodes
+// `type = mysql`), so a sqlite code path here would be dead code with no way to
+// test it. It tolerates an uninitialised database because ConnectToDatabase
+// runs on every serve, including before --init-db has been run.
 func (db *datastore) ensureMaxBlogsColumn() error {
 	var v sql.NullInt64
 

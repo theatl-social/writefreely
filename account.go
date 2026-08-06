@@ -8,6 +8,11 @@
  * in the LICENSE file in this source code package.
  */
 
+/*
+ * Modified 2026 by theATL.social: gate the new-blog affordance on the user's
+ * per-user allowance. See FORK.md for the full list of changes.
+ */
+
 package writefreely
 
 import (
@@ -850,10 +855,14 @@ func viewCollections(app *App, u *User, w http.ResponseWriter, r *http.Request) 
 		NewBlogsDisabled bool
 		Silenced         bool
 	}{
-		UserPage:         NewUserPage(app, r, u, u.Username+"'s Blogs", f),
-		Collections:      c,
-		UsedCollections:  int(uc),
-		NewBlogsDisabled: !app.cfg.App.CanCreateBlogs(uc),
+		UserPage:        NewUserPage(app, r, u, u.Username+"'s Blogs", f),
+		Collections:     c,
+		UsedCollections: int(uc),
+		// theATL fork: the button must follow the user's OWN allowance, not the
+		// instance-wide fallback — otherwise a Dogwood member with 15 blogs
+		// allowed sees no way to create the second. Reusing checkBlogLimit keeps
+		// the UI and the enforcement from drifting apart. See FORK.md.
+		NewBlogsDisabled: app.checkBlogLimit(u.ID) != nil,
 		Silenced:         silenced,
 	}
 	d.UserPage.SetMessaging(u)

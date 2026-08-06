@@ -20,6 +20,12 @@ tls      = false
 site_name         = theATL Writes
 host              = https://write.theatl.social
 single_user       = false
+# NOTE: config.Load maps onto a zero-valued struct, so any key absent from this
+# file silently becomes Go's zero value — it is NOT defaulted. An absent `theme`
+# renders /css/.css and the whole site comes up unstyled; an absent `max_blogs`
+# becomes 0, which means UNLIMITED. Do not delete keys from this file.
+theme             = write
+webfonts          = true
 # open_registration MUST stay true: it is what registers POST /api/auth/signup,
 # which the member site uses to provision accounts. Public signup is blocked at
 # haproxy, NOT by this flag. See FORK.md before changing it.

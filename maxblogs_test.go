@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/writeas/impart"
 	"github.com/writefreely/writefreely/config"
+	"github.com/writefreely/writefreely/key"
 )
 
 func TestEnsureMaxBlogsColumn(t *testing.T) {
@@ -383,4 +384,53 @@ func TestHandleSetMaxBlogsRefusesUnsetSecret(t *testing.T) {
 
 	assert.Equal(t, http.StatusServiceUnavailable, w.Code,
 		"an unset secret must fail closed")
+}
+
+// TestMaxBlogsRouteIsRegistered guards against the one failure mode none of
+// the tests above can catch: every test up to this point builds its own
+// throwaway mux.Router and registers handleSetMaxBlogs by hand, so all of them
+// would keep passing even if the real registration —
+// write.HandleFunc("/api/internal/user/{username}/max-blogs", ...) in
+// routes.go's InitRoutes — were deleted entirely. That is exactly the kind of
+// line a conflicted upstream merge can silently drop. This test builds the
+// actual production router via InitRoutes and confirms the route resolves
+// against it.
+func TestMaxBlogsRouteIsRegistered(t *testing.T) {
+	// Must be config.New(), not &config.Config{}: InitRoutes does
+	// cfg.App.Host[strings.Index(cfg.App.Host, "://")+3:] unconditionally, which
+	// panics (slice bounds out of range) on an empty Host. config.New() sets
+	// Host to "http://localhost:8080".
+	cfg := config.New()
+	// config.New() defaults to SingleUser: true, which routes nodeInfoConfig
+	// through db.GetCollectionByID(1) — a real query this test's nil db can't
+	// serve. The fork's actual deployment runs multi-user (config.ini.example
+	// sets single_user = false), so this also matches production's routing
+	// shape, not just avoiding a crash.
+	cfg.App.SingleUser = false
+
+	if err := InitTemplates(cfg); err != nil {
+		t.Fatalf("InitTemplates: %v (expected to find templates/ and pages/ "+
+			"relative to the test binary's working directory)", err)
+	}
+
+	app := &App{
+		cfg: cfg,
+		// A couple of routes InitRoutes registers are wrapped in
+		// csrf.Protect(app.keys.CSRFKey); a nil *key.Keychain panics on that field
+		// access before InitRoutes ever gets to the route this test checks.
+		keys: &key.Keychain{CSRFKey: []byte("0123456789abcdef0123456789abcdef")},
+	}
+
+	router := mux.NewRouter()
+	InitRoutes(app, router)
+
+	req := httptest.NewRequest("POST", "/api/internal/user/someuser/max-blogs", nil)
+	var match mux.RouteMatch
+	if !router.Match(req, &match) {
+		t.Fatalf("POST /api/internal/user/{username}/max-blogs did not resolve "+
+			"against the real router (match error: %v) — the registration in "+
+			"routes.go's InitRoutes appears to be missing", match.MatchErr)
+	}
+	assert.Equal(t, "someuser", match.Vars["username"],
+		"the {username} path variable should capture the username segment")
 }

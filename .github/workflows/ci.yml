@@ -23,9 +23,13 @@ jobs:
           --health-interval=10s --health-timeout=5s --health-retries=10
 
     steps:
-      - uses: actions/checkout@v4
+      # theATL fork: pinned to an exact release, not a floating major tag. This
+      # job (and docker-publish.yml) hold packages: write / touch the registry
+      # our production pulls from — the same reasoning that ruled out
+      # trufflehog@main below.
+      - uses: actions/checkout@v7.0.1
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7.0.0
         with:
           go-version: '1.25'
 
@@ -130,7 +134,9 @@ jobs:
   secret-scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # theATL fork: pinned to an exact release, not a floating major tag. See
+      # the note on the build-and-test job's checkout step.
+      - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
       - name: TruffleHog (verified and unverified)

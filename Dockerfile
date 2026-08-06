@@ -1,8 +1,12 @@
 # Build image
 FROM golang:1.25-alpine3.22 AS build
 
-LABEL org.opencontainers.image.source="https://github.com/writefreely/writefreely"
-LABEL org.opencontainers.image.description="WriteFreely is a clean, minimalist publishing platform made for writers. Start a blog, share knowledge within your organization, or build a community around the shared act of writing."
+# theATL fork: point GHCR's source/description at our fork, not upstream —
+# this image runs modified AGPL code and must not claim upstream WriteFreely
+# as its corresponding source. See FORK.md.
+LABEL org.opencontainers.image.source="https://github.com/theatl-social/writefreely"
+# theATL fork: describe this fork, not upstream, for the same reason.
+LABEL org.opencontainers.image.description="theATL.social's fork of WriteFreely, a clean, minimalist publishing platform made for writers, with per-user blog allowances for membership tiers. See FORK.md."
 
 RUN apk -U upgrade \
     && apk add --no-cache nodejs npm make g++ git \
