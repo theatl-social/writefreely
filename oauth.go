@@ -8,6 +8,11 @@
  * in the LICENSE file in this source code package.
  */
 
+/*
+ * Modified 2026 by theATL.social: added just-in-time account provisioning
+ * gated on a pre-authorization pushed by the member site. See FORK.md.
+ */
+
 package writefreely
 
 import (
@@ -387,6 +392,63 @@ func (h oauthHandler) viewOauthCallback(app *App, w http.ResponseWriter, r *http
 		}
 		return impart.HTTPError{http.StatusFound, "/me/settings"}
 	}
+
+	// theATL fork: just-in-time provisioning. If this Mastodon identity has a
+	// pending pre-authorization (pushed by the member site in advance), create
+	// the account now instead of falling through to the manual signup page.
+	// GetOauthPreauth/SetUserMaxBlogs/DeleteOauthPreauth/GetUserForAuth are
+	// defined only on the concrete *datastore (oauth_preauth.go, database.go),
+	// not on the h.DB field's narrower OAuthDatastore interface above, so they
+	// are reached via app.db here -- the same way the existing
+	// app.db.GetUserInvite call a few lines below already does. See FORK.md and
+	// the design spec's "Revision 2 — OAuth JIT Provisioning".
+	maxBlogs, eligible, err := app.db.GetOauthPreauth(tokenInfo.UserID, provider, clientID)
+	if err != nil {
+		return impart.HTTPError{http.StatusInternalServerError, err.Error()}
+	}
+	if eligible {
+		username := normalizeOauthUsername(tokenInfo.Username, tokenInfo.UserID, func(u string) bool {
+			_, err := app.db.GetUserForAuth(u)
+			return err == nil
+		})
+
+		newUser := &User{
+			Username: username,
+			// No password: this account is only ever reachable via OAuth login.
+			// CreateUser's INSERT writes u.HashedPass directly into a NOT NULL
+			// column, so this must be a non-nil empty slice, not the zero value
+			// -- the same convention oauth_signup.go uses when no password is
+			// submitted (hashedPass := []byte{}).
+			HashedPass: []byte{},
+			Created:    time.Now().Truncate(time.Second).UTC(),
+		}
+		if err = h.DB.CreateUser(h.Config, newUser, tokenInfo.DisplayName, ""); err != nil {
+			return impart.HTTPError{http.StatusInternalServerError, err.Error()}
+		}
+		if err = app.db.SetUserMaxBlogs(newUser.Username, maxBlogs); err != nil {
+			log.Error("oauth JIT: created user %q but failed to set max_blogs: %v", newUser.Username, err)
+			// Do not fail the login over this -- the user account exists and is
+			// usable; worst case they fall back to the instance default limit
+			// until the next allowance push or the nightly audit corrects it.
+		}
+		if err = h.DB.RecordRemoteUserID(r.Context(), newUser.ID, tokenInfo.UserID, provider, clientID, tokenResponse.AccessToken); err != nil {
+			return impart.HTTPError{http.StatusInternalServerError, err.Error()}
+		}
+		if err = app.db.DeleteOauthPreauth(tokenInfo.UserID, provider, clientID); err != nil {
+			log.Error("oauth JIT: provisioned user %q but failed to delete preauth row: %v", newUser.Username, err)
+		}
+
+		if err = loginOrFail(h.Store, w, r, newUser); err != nil {
+			log.Error("Unable to loginOrFail %d: %s", newUser.ID, err)
+			return impart.HTTPError{http.StatusInternalServerError, err.Error()}
+		}
+		return nil
+	}
+
+	// Not eligible: no account is created. This must NOT fall through to
+	// showOauthSignupPage -- that is self-serve signup, permanently closed. See
+	// the design spec's Non-goals.
+	return impart.HTTPError{http.StatusForbidden, "This Mastodon account is not currently linked to an active theATL.social membership. If you believe this is an error, check your membership status at members.theatl.social."}
 
 	// New user registration below.
 	// First, verify that user is allowed to register
