@@ -1540,7 +1540,20 @@ func handleUserDelete(app *App, u *User, w http.ResponseWriter, r *http.Request)
 }
 
 func removeOauth(app *App, u *User, w http.ResponseWriter, r *http.Request) error {
-	provider := r.FormValue("provider")
+	// Normalize once, up front, and use this value for BOTH the gate check
+	// below and the unlink call -- not the raw form value for one and a
+	// re-derived value for the other. This matters because oauth_users.provider
+	// is a MariaDB column using a case-insensitive (and accent-/pad-insensitive)
+	// collation (utf8mb4_uca1400_ai_ci, confirmed via SHOW FULL COLUMNS): the
+	// DELETE below would match "generic", "Generic", "GENERIC", or "generic "
+	// all the same, regardless of what Go-level string comparison guards it.
+	// A prior version of this fix compared the raw, un-normalized form value
+	// with Go's case-sensitive ==, so provider=Generic silently skipped the
+	// 403 while the DELETE still matched and removed the link -- a complete
+	// bypass of the AllowDisconnect gate below. strings.ToLower plus TrimSpace
+	// mirrors the collation's case- and pad-insensitivity so the Go-level
+	// check can't disagree with what the database actually does.
+	provider := strings.ToLower(strings.TrimSpace(r.FormValue("provider")))
 	clientID := r.FormValue("client_id")
 	remoteUserID := r.FormValue("remote_user_id")
 

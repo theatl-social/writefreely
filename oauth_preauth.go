@@ -116,6 +116,22 @@ const oauthRevokedAccountMaxBlogs = 1
 // per-identity advisory lock (see withOauthIdentityLock) before giving up.
 const oauthIdentityLockTimeoutSeconds = 10
 
+// oauthIdentityLockPoolMaxOpenConns sizes App.oauthLockDB (app.go), the
+// dedicated connection pool withOauthIdentityLock pins its GET_LOCK/
+// RELEASE_LOCK connection from -- deliberately separate from the main pool's
+// MaxOpenConns(50) (app.go's connectToDatabase). See withOauthIdentityLock's
+// doc comment for the full deadlock this separation fixes; this constant only
+// needs to answer "how many identities can have a lock pinned at once" for a
+// single community's Mastodon membership logging in, which is nowhere near
+// internet-scale. Kept in the single digits deliberately: this pool exists
+// ONLY to hold pinned lock connections (never runs fn()'s own queries, which
+// still go through the main pool), so it does not need to track the main
+// pool's size at all -- a caller beyond this many concurrent identity-locks
+// simply queues briefly for a lock-pool connection via context, the same way
+// it would queue for any other exhausted pool, and does not compete with or
+// diminish the main pool's 50 connections in any way.
+const oauthIdentityLockPoolMaxOpenConns = 8
+
 // oauthIdentityLockName derives a MariaDB GET_LOCK() name for one OAuth
 // identity. GET_LOCK() lock names are capped at 64 characters (MariaDB, like
 // MySQL); remote_user_id/provider/client_id are arbitrary-length strings
@@ -150,23 +166,50 @@ func oauthIdentityLockName(remoteUserID, provider, clientID string) string {
 //
 // GET_LOCK()/RELEASE_LOCK() are session-scoped: they must be acquired and
 // released on the SAME underlying connection, which is why this pins one via
-// Conn() rather than going through the normal pooled db.Exec/QueryRow. The
-// work inside fn is free to use the ordinary pooled connection for its own
-// queries -- the mutual exclusion comes entirely from holding the named lock
-// for fn's duration, not from which connection fn's queries happen to run on.
+// Conn() rather than going through the normal pooled db.Exec/QueryRow.
+//
+// That pinned connection comes from app.oauthLockDB -- a small, SEPARATE pool
+// from app.db's own (see the App.oauthLockDB field doc comment in app.go) --
+// not from app.db's pool. The work inside fn is free to use app.db's ordinary
+// pooled connections for its own queries; the mutual exclusion comes entirely
+// from holding the named lock for fn's duration, not from which connection
+// fn's queries happen to run on.
+//
+// This split exists because an earlier version of this function pinned the
+// connection from app.db's own pool. Under enough concurrent callers, every
+// one of that pool's connections ended up pinned by a lock-holder that was
+// itself blocked waiting for a SECOND connection from that same, now-
+// exhausted pool to run fn() -- a hard deadlock that starved the entire
+// application (not just OAuth logins), reproduced directly against a real
+// MariaDB: at concurrency == MaxOpenConns, a sub-millisecond operation below
+// that threshold became a total hang with 100% failure. Pinning from a
+// dedicated pool instead makes that starvation structurally impossible: no
+// matter how many identities are locked concurrently, pinning connections
+// here can never compete for or consume connections app.db's pool needs, for
+// this code's own fn() or for anything else the application is doing.
 //
 // This fork's only deployment target is MariaDB (see maxblogs.go's
 // ensureMaxBlogsColumn for the same reasoning), so this is a no-op
 // passthrough under sqlite: there is no concurrent production traffic to
-// race in that configuration, and GET_LOCK has no sqlite equivalent.
-func (db *datastore) withOauthIdentityLock(ctx context.Context, remoteUserID, provider, clientID string, fn func() error) error {
-	if db.driverName != driverMySQL {
+// race in that configuration, GET_LOCK has no sqlite equivalent, and
+// app.oauthLockDB is never opened (nil) for that driver.
+func withOauthIdentityLock(ctx context.Context, app *App, remoteUserID, provider, clientID string, fn func() error) error {
+	if app.db.driverName != driverMySQL {
 		return fn()
+	}
+	if app.oauthLockDB == nil {
+		// Fail loudly rather than silently falling back to pinning app.db's
+		// own pool -- that fallback would quietly reintroduce the exact
+		// deadlock this split exists to prevent. Every real (non-test) mysql
+		// code path always has this set by connectToDatabase (app.go); seeing
+		// this means a caller (very likely a test) built an *App by hand
+		// without wiring it up.
+		return fmt.Errorf("oauth identity lock: App.oauthLockDB is nil for the mysql driver -- refusing to fall back to the main pool")
 	}
 
 	name := oauthIdentityLockName(remoteUserID, provider, clientID)
 
-	conn, err := db.Conn(ctx)
+	conn, err := app.oauthLockDB.Conn(ctx)
 	if err != nil {
 		return fmt.Errorf("oauth identity lock: acquiring connection: %w", err)
 	}
@@ -273,7 +316,7 @@ func handleSetMastodonUserMaxBlogs(app *App) http.HandlerFunc {
 		clientID := app.cfg.GenericOauth.ClientID
 		revoke := *body.MaxBlogs == 0
 
-		err := app.db.withOauthIdentityLock(r.Context(), remoteUserID, provider, clientID, func() error {
+		err := withOauthIdentityLock(r.Context(), app, remoteUserID, provider, clientID, func() error {
 			localUserID, err := app.db.GetIDForRemoteUser(r.Context(), remoteUserID, provider, clientID)
 			if err != nil {
 				log.Error("oauth_preauth: lookup failed for %q: %v", remoteUserID, err)

@@ -422,13 +422,16 @@ func (h oauthHandler) viewOauthCallback(app *App, w http.ResponseWriter, r *http
 	// theATL fork: just-in-time provisioning. If this Mastodon identity has a
 	// pending pre-authorization (pushed by the member site in advance), create
 	// the account now instead of falling through to the manual signup page.
-	// GetOauthPreauth/SetUserMaxBlogs/DeleteOauthPreauth/GetUserForAuth/
-	// withOauthIdentityLock are defined only on the concrete *datastore
-	// (oauth_preauth.go, database.go), not on the h.DB field's narrower
-	// OAuthDatastore interface above, so they are reached via app.db here --
-	// the same way the existing app.db.GetUserInvite call a few lines below
-	// already does. See FORK.md and the design spec's "Revision 2 — OAuth JIT
-	// Provisioning".
+	// GetOauthPreauth/SetUserMaxBlogs/DeleteOauthPreauth/GetUserForAuth are
+	// defined only on the concrete *datastore (oauth_preauth.go, database.go),
+	// not on the h.DB field's narrower OAuthDatastore interface above, so they
+	// are reached via app.db here -- the same way the existing
+	// app.db.GetUserInvite call a few lines below already does.
+	// withOauthIdentityLock (oauth_preauth.go) takes the whole *App, not just
+	// app.db: it needs both app.db.driverName and the separate app.oauthLockDB
+	// pool its advisory lock pins a connection from (see that function's doc
+	// comment for why those two pools must stay separate). See FORK.md and the
+	// design spec's "Revision 2 — OAuth JIT Provisioning".
 	//
 	// Everything from the re-check below through the preauth delete runs
 	// inside withOauthIdentityLock, keyed on this exact identity
@@ -443,7 +446,7 @@ func (h oauthHandler) viewOauthCallback(app *App, w http.ResponseWriter, r *http
 	// (oauth_preauth.go) for the full race and why a plain transaction alone
 	// can't close it.
 	var jitHandled bool
-	lockErr := app.db.withOauthIdentityLock(ctx, tokenInfo.UserID, provider, clientID, func() error {
+	lockErr := withOauthIdentityLock(ctx, app, tokenInfo.UserID, provider, clientID, func() error {
 		// Re-check linkage inside the lock: the GetIDForRemoteUser call above
 		// (before this lock was acquired) can be stale by the time we get
 		// here -- e.g. two near-simultaneous logins for the same Mastodon

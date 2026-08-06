@@ -325,7 +325,7 @@ func TestViewOauthCallbackJITProvisioning(t *testing.T) {
 		cfg.App.OpenRegistration = true
 
 		store := sessions.NewCookieStore([]byte("secret-key"))
-		app := &App{db: ds, cfg: cfg, sessionStore: store}
+		app := &App{db: ds, cfg: cfg, sessionStore: store, oauthLockDB: newTestOauthLockDB(t, db)}
 
 		// mockRoundTrip stands in for the real Mastodon /oauth/token and
 		// /oauth/inspect endpoints, following the same MockHTTPClient approach
@@ -688,7 +688,7 @@ func TestOauthPreauthRevokeThenLoginRefuses(t *testing.T) {
 		cfg := config.New()
 		cfg.GenericOauth.ClientID = "client-revoke-1"
 		store := sessions.NewCookieStore([]byte("secret-key"))
-		app := &App{db: ds, cfg: cfg, sessionStore: store}
+		app := &App{db: ds, cfg: cfg, sessionStore: store, oauthLockDB: newTestOauthLockDB(t, db)}
 
 		router := mux.NewRouter()
 		router.HandleFunc("/api/internal/mastodon-user/{remoteUserID}/max-blogs",
@@ -825,7 +825,7 @@ func TestOauthLoginRaceWithMaxBlogsPushIsLinearizable(t *testing.T) {
 		cfg := config.New()
 		cfg.GenericOauth.ClientID = "client-race-1"
 		store := sessions.NewCookieStore([]byte("secret-key"))
-		app := &App{db: ds, cfg: cfg, sessionStore: store}
+		app := &App{db: ds, cfg: cfg, sessionStore: store, oauthLockDB: newTestOauthLockDB(t, db)}
 		clientID := cfg.GenericOauth.ClientID
 
 		router := mux.NewRouter()

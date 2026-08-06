@@ -8,6 +8,7 @@ import (
 	stdlog "log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,6 +23,28 @@ import (
 	"github.com/writefreely/writefreely/config"
 	"github.com/writefreely/writefreely/key"
 )
+
+// newTestOauthLockDB opens a small, SEPARATE connection pool pointing at the
+// exact same ephemeral database withTestDB just created for db, sized like
+// production's oauthIdentityLockPoolMaxOpenConns. Use it to set an *App's
+// oauthLockDB field in any test that exercises withOauthIdentityLock, whether
+// directly or via handleSetMastodonUserMaxBlogs/viewOauthCallback.
+//
+// This mirrors, at test scale, exactly what connectToDatabase (app.go) does
+// in production: withOauthIdentityLock now fails loudly (rather than
+// silently falling back to db's own pool) if App.oauthLockDB isn't wired up,
+// specifically so that a test -- or any future caller -- can't quietly
+// resurrect the deadlock the pool split fixes by skipping this wiring.
+func newTestOauthLockDB(t *testing.T, db *sql.DB) *sql.DB {
+	t.Helper()
+	var dbName string
+	require.NoError(t, db.QueryRow("SELECT DATABASE()").Scan(&dbName))
+	lockDB, err := initMySQL(os.Getenv("WF_USER"), os.Getenv("WF_PASSWORD"), dbName, os.Getenv("WF_HOST"))
+	require.NoError(t, err)
+	lockDB.SetMaxOpenConns(oauthIdentityLockPoolMaxOpenConns)
+	t.Cleanup(func() { _ = lockDB.Close() })
+	return lockDB
+}
 
 func TestEnsureOauthPreauthTable(t *testing.T) {
 	if !runMySQLTests() {
@@ -93,7 +116,7 @@ func TestHandleSetMastodonUserMaxBlogs(t *testing.T) {
 		assert.NoError(t, ds.ensureMaxBlogsColumn())
 		assert.NoError(t, ds.ensureOauthPreauthTable())
 
-		app := &App{db: ds, cfg: config.New()}
+		app := &App{db: ds, cfg: config.New(), oauthLockDB: newTestOauthLockDB(t, db)}
 		secret := "0123456789abcdef0123456789abcdef"
 		t.Setenv("WRITEFREELY_API_SECRET", secret)
 
@@ -225,7 +248,7 @@ func TestHandleSetMastodonUserMaxBlogsRevokePending(t *testing.T) {
 		ds := &datastore{DB: db, driverName: driverMySQL}
 		assert.NoError(t, ds.ensureOauthPreauthTable())
 
-		app := &App{db: ds, cfg: config.New()}
+		app := &App{db: ds, cfg: config.New(), oauthLockDB: newTestOauthLockDB(t, db)}
 		secret := "0123456789abcdef0123456789abcdef"
 		t.Setenv("WRITEFREELY_API_SECRET", secret)
 
@@ -286,7 +309,7 @@ func TestHandleSetMastodonUserMaxBlogsRevokeAlreadyLinked(t *testing.T) {
 		assert.NoError(t, ds.ensureMaxBlogsColumn())
 		assert.NoError(t, ds.ensureOauthPreauthTable())
 
-		app := &App{db: ds, cfg: config.New()}
+		app := &App{db: ds, cfg: config.New(), oauthLockDB: newTestOauthLockDB(t, db)}
 		secret := "0123456789abcdef0123456789abcdef"
 		t.Setenv("WRITEFREELY_API_SECRET", secret)
 
@@ -365,6 +388,7 @@ func TestWithOauthIdentityLockSerializesConcurrentCallers(t *testing.T) {
 	}
 	withTestDB(t, func(db *sql.DB) {
 		ds := &datastore{DB: db, driverName: driverMySQL}
+		app := &App{db: ds, oauthLockDB: newTestOauthLockDB(t, db)}
 
 		const remoteUserID, provider, clientID = "lock-race-1", "generic", "client-lock-race-1"
 		const goroutines = 8
@@ -379,7 +403,7 @@ func TestWithOauthIdentityLockSerializesConcurrentCallers(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				<-start
-				err := ds.withOauthIdentityLock(context.Background(), remoteUserID, provider, clientID, func() error {
+				err := withOauthIdentityLock(context.Background(), app, remoteUserID, provider, clientID, func() error {
 					cur := atomic.AddInt32(&inFlight, 1)
 					for {
 						old := atomic.LoadInt32(&maxObserved)
@@ -443,7 +467,7 @@ func TestHandleSetMastodonUserMaxBlogsWaitsForInFlightLogin(t *testing.T) {
 		assert.NoError(t, ds.ensureMaxBlogsColumn())
 		assert.NoError(t, ds.ensureOauthPreauthTable())
 
-		app := &App{db: ds, cfg: config.New()}
+		app := &App{db: ds, cfg: config.New(), oauthLockDB: newTestOauthLockDB(t, db)}
 		secret := "0123456789abcdef0123456789abcdef"
 		t.Setenv("WRITEFREELY_API_SECRET", secret)
 
@@ -464,7 +488,7 @@ func TestHandleSetMastodonUserMaxBlogsWaitsForInFlightLogin(t *testing.T) {
 		loginDone := make(chan struct{})
 		go func() {
 			defer close(loginDone)
-			err := ds.withOauthIdentityLock(context.Background(), remoteUserID, provider, clientID, func() error {
+			err := withOauthIdentityLock(context.Background(), app, remoteUserID, provider, clientID, func() error {
 				close(loginHoldsLock)
 				<-releaseLogin
 				// Simulate the end state a real JIT login (oauth.go) leaves
