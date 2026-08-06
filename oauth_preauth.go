@@ -163,7 +163,9 @@ func handleSetMastodonUserMaxBlogs(app *App) http.HandlerFunc {
 			}
 			// Defensive: a preauth row should not exist once linked, but a race
 			// between provisioning and a second push could leave one. Clear it.
-			_ = app.db.DeleteOauthPreauth(remoteUserID, provider, clientID)
+			if err := app.db.DeleteOauthPreauth(remoteUserID, provider, clientID); err != nil {
+				log.Error("oauth_preauth: cleanup delete failed for %q (user already linked, non-fatal): %v", remoteUserID, err)
+			}
 		} else {
 			if err := app.db.UpsertOauthPreauth(remoteUserID, provider, clientID, *body.MaxBlogs); err != nil {
 				log.Error("oauth_preauth: upsert failed for %q: %v", remoteUserID, err)
