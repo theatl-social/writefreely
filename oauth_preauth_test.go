@@ -1,8 +1,10 @@
 package writefreely
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	stdlog "log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +12,8 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	wclog "github.com/writeas/web-core/log"
 	"github.com/writefreely/writefreely/config"
 	"github.com/writefreely/writefreely/key"
 )
@@ -339,4 +343,59 @@ func TestNormalizeOauthUsername(t *testing.T) {
 			assert.Equal(t, tc.want, normalizeOauthUsername(tc.mastodon, tc.remoteID, tc.taken))
 		})
 	}
+}
+
+// TestNormalizeOauthUsernameFinalTierCollision guards the fix for the last
+// fallback tier ("user-<remoteUserID>") being assumed unique by construction
+// and never passed through taken() at all. That assumption doesn't fully
+// hold: a pre-existing account/collection/post literally named
+// "user-<remoteUserID>" is reachable -- via the orphan-retry scenario this
+// function's own doc comment describes, or via /auth/signup's invite-code
+// bypass (see FORK.md's "Known limits") -- and when it happens, the
+// caller's CreateUser call 409s with nothing in the logs to explain why: a
+// permanent, opaque lockout for that Mastodon identity.
+//
+// This test forces a collision at ALL THREE tiers (base, ID-suffixed, and
+// the final "user-<remoteID>" form) and asserts:
+//   - taken() is actually invoked with the final-tier candidate -- proving
+//     the fix's core change (this tier is no longer skipped).
+//   - normalizeOauthUsername still returns the final-tier value rather than
+//     panicking -- there is no fourth tier, so handing it back for the
+//     caller's CreateUser to 409 on is the correct, preserved behavior.
+//   - a log line fires identifying the collision, containing the remote
+//     user ID, the provider, and the exact username string that collided,
+//     so the eventual 409 is discoverable instead of a silent 500.
+func TestNormalizeOauthUsernameFinalTierCollision(t *testing.T) {
+	const mastodonUsername = "jsmith"
+	const remoteID = "14882"
+	finalTier := "user-" + remoteID
+
+	var takenCalls []string
+	taken := func(u string) bool {
+		takenCalls = append(takenCalls, u)
+		return true // every tier reports occupied, including the final one
+	}
+
+	// Capture web-core/log's error output for the duration of this test, and
+	// restore it afterward -- ErrorLog is a shared package-level *log.Logger.
+	var logBuf bytes.Buffer
+	origErrorLog := wclog.ErrorLog
+	wclog.ErrorLog = stdlog.New(&logBuf, "ERROR: ", 0)
+	defer func() { wclog.ErrorLog = origErrorLog }()
+
+	var got string
+	require.NotPanics(t, func() {
+		got = normalizeOauthUsername(mastodonUsername, remoteID, taken)
+	}, "exhausting every fallback tier must not panic -- there is no fourth tier to fall back to")
+
+	assert.Equal(t, finalTier, got,
+		"with every tier occupied, the function must still return the final-tier value -- the caller's CreateUser is expected to 409 on it, not this function")
+
+	assert.Contains(t, takenCalls, finalTier,
+		"the final fallback tier must be run through taken() like every other tier -- this is the core of the fix")
+
+	logOutput := logBuf.String()
+	assert.Contains(t, logOutput, remoteID, "log line should include the Mastodon remote user ID")
+	assert.Contains(t, logOutput, "generic", "log line should include the provider")
+	assert.Contains(t, logOutput, finalTier, "log line should include the exact username string that collided")
 }

@@ -39,7 +39,7 @@ jobs:
       # Upstream v0.17.1 has never run go vet in CI and carries ~290 pre-existing
       # findings (268 `composites` alone, plus printf, structtag, unreachable,
       # copylocks) across a dozen files. Those files are far outside the
-      # three-file merge-surface budget that is this fork's entire premise, so
+      # six-file merge-surface budget that is this fork's entire premise, so
       # they are not ours to fix.
       #
       # Every analyzer therefore stays ENABLED — nothing is turned off — and the
@@ -90,34 +90,14 @@ jobs:
           mysql -h 127.0.0.1 -u root -pci_root_pw \
             -e "GRANT ALL PRIVILEGES ON *.* TO 'writefreely'@'%'; FLUSH PRIVILEGES;"
 
-      # Exactly two upstream SUBTESTS are genuinely broken at v0.17.1, independent
-      # of database schema or privileges, and are skipped by their fully
+      # One upstream SUBTEST is genuinely broken at v0.17.1, independent of
+      # database schema or privileges, and is skipped by its fully
       # slash-qualified subtest path rather than at the parent-test level, so
       # every other subtest (and every other upstream test) keeps gating our
       # changes. Without the "/subtest" qualifier, `-skip` matches the parent
       # test name and drops every subtest beneath it — e.g. TestUpdatesRoundTrip
       # has five subtests (New Updates Cache, Release URL, Check Now, Are
       # Available, Latest Version) and only "Release URL" is broken.
-      #
-      # - TestViewOauthCallback/success (oauth_test.go): STALE RATIONALE, kept
-      #   here only for history -- this subtest is no longer broken for the
-      #   reason once documented (a redirect-assertion mismatch from a
-      #   registration-blocked branch, pre-dating this fork's OAuth work).
-      #   It is now ALSO self-skipped in-code (an explicit t.Skip at the top
-      #   of the subtest, oauth_test.go) with the current, accurate reason:
-      #   the fork's JIT branch in oauth.go runs unconditionally before the
-      #   branch this subtest exercises, and calls app.db.GetOauthPreauth via
-      #   the concrete *datastore -- a call this subtest's intentionally-nil
-      #   app.db cannot serve, so without a fix it panics and aborts the
-      #   whole package test binary, silently taking this fork's own
-      #   TestViewOauthCallbackJITProvisioning and
-      #   TestOauthSignupRouteIsNotRegistered down with it. This entry in
-      #   `-skip` is now redundant with that in-code skip, not load-bearing:
-      #   removing it should be a no-op (the subtest reports SKIP either way).
-      #   Left in place mainly so this comment block doesn't need to shrink
-      #   awkwardly mid-explanation. See oauth_test.go's t.Skip call for the
-      #   authoritative, up-to-date reasoning -- do not resurrect the
-      #   OpenRegistration explanation above if this entry is ever revisited.
       #
       # - TestUpdatesRoundTrip/Release_URL (updates_test.go): newUpdatesCache
       #   (updates.go:98-105) launches its version-check network call in
@@ -127,15 +107,22 @@ jobs:
       #   immediately after construction — a race, not a network-outage symptom
       #   (reproduces identically whether or not the network call itself
       #   succeeds). Pre-existing at v0.17.1; updates.go/updates_test.go are
-      #   outside the three-file merge-surface budget. The other four
+      #   outside the six-file merge-surface budget. The other four
       #   TestUpdatesRoundTrip subtests are unaffected and must keep running.
       #
-      # Revisit both on every upstream merge. For TestUpdatesRoundTrip/Release_URL,
-      # delete the entry the moment a release fixes the underlying race. For
-      # TestViewOauthCallback/success, this entry may be deleted at any time --
-      # unlike the old assumption, doing so cannot silently disable this
-      # fork's security regression tests, because the in-code t.Skip is what
-      # actually prevents the panic now.
+      # TestViewOauthCallback/success (oauth_test.go) used to have its own entry
+      # here too, for a rationale that went stale (a redirect-assertion mismatch
+      # pre-dating this fork's OAuth work) and was then superseded by a second,
+      # current reason (a nil-app.db panic from the fork's unconditional JIT
+      # branch). That subtest now carries its own in-code `t.Skip` (oauth_test.go)
+      # with the current reasoning, which is sufficient on its own -- an entry
+      # here would be redundant, not load-bearing, so it has been removed rather
+      # than kept "for history". If a future upstream merge changes this subtest
+      # enough that the in-code skip stops applying, judge it fresh against
+      # oauth_test.go rather than restoring this entry on the old rationale.
+      #
+      # Revisit on every upstream merge; delete this entry the moment a release
+      # fixes the underlying newUpdatesCache race.
       - name: Test
         env:
           TEST_MYSQL: '1'
@@ -143,7 +130,7 @@ jobs:
           WF_PASSWORD: ci_pw
           WF_DB: writefreely
           WF_HOST: 127.0.0.1
-        run: go test -vet=off -tags='netgo sqlite' -skip 'TestViewOauthCallback/success|TestUpdatesRoundTrip/Release_URL' ./... -v
+        run: go test -vet=off -tags='netgo sqlite' -skip 'TestUpdatesRoundTrip/Release_URL' ./... -v
 
   secret-scan:
     runs-on: ubuntu-latest

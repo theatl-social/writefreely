@@ -329,11 +329,23 @@ func configureOauthRoutes(parentHandler *Handler, r *mux.Router, app *App, oauth
 	// config, making that signature trivially forgeable. This route, and only
 	// this route, is closed in code: the OAuth path's only door is the
 	// oauth_preauth-gated JIT branch in viewOauthCallback below. That is NOT
-	// the same as "self-serve signup is closed instance-wide" -- POST
-	// /api/auth/signup and POST /auth/signup (routes.go) remain registered
-	// unconditionally and stay open at the application level, gated only by
-	// open_registration in config plus a HAProxy ACL that lives entirely
-	// outside this repo, not by any preauth check. See FORK.md.
+	// the same as "self-serve signup is closed instance-wide" -- two other
+	// signup routes exist and neither is closed by this fork's code:
+	//   - POST /api/auth/signup (routes.go) IS gated by open_registration at
+	//     route-registration time: the handler isn't even mounted when
+	//     open_registration is false.
+	//   - POST /auth/signup (routes.go) is registered UNCONDITIONALLY,
+	//     regardless of open_registration. Its in-app check
+	//     (unregisteredusers.go's handleWebSignup) only rejects when
+	//     open_registration is false AND the submitted invite_code is empty
+	//     -- any non-empty invite_code bypasses that check, and the code is
+	//     never validated against the database before the account is
+	//     created (account.go's signupWithRegistration; database.go's
+	//     CreateInvitedUser is a bare insert that runs AFTER CreateUser has
+	//     already succeeded). So open_registration provides no real
+	//     protection on this route; the only actual gate on POST
+	//     /auth/signup in this deployment is an external HAProxy ACL that
+	//     lives entirely outside this repo. See FORK.md's "Known limits".
 	// viewOauthSignup/validateOauthSignup/showOauthSignupPage/HashTokenParams
 	// remain in oauth_signup.go, unrouted but still valid Go -- Go does not
 	// error on unreachable handler methods.
@@ -500,10 +512,13 @@ func (h oauthHandler) viewOauthCallback(app *App, w http.ResponseWriter, r *http
 
 	// Not eligible: no account is created. This must NOT fall through to
 	// showOauthSignupPage -- the OAuth path's only door is the preauth check
-	// above, enforced unconditionally in code. (In-app self-serve signup, POST
-	// /api/auth/signup and POST /auth/signup, remains open at the application
-	// level and is blocked only by a HAProxy ACL outside this repo -- see
-	// FORK.md. That infra dependency has no bearing on this OAuth code path.)
+	// above, enforced unconditionally in code. (In-app self-serve signup is a
+	// separate story per route: POST /api/auth/signup IS gated by
+	// open_registration at route-registration time, but POST /auth/signup is
+	// registered unconditionally and its open_registration check is bypassed
+	// by any non-empty invite_code -- so in practice it is blocked only by a
+	// HAProxy ACL outside this repo. See FORK.md's "Known limits". That infra
+	// dependency has no bearing on this OAuth code path.)
 	return impart.HTTPError{http.StatusForbidden, "This Mastodon account is not currently linked to an active theATL.social membership. If you believe this is an error, check your membership status at members.theatl.social."}
 
 	// New user registration below.

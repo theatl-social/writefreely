@@ -406,8 +406,12 @@ func TestViewOauthCallbackJITProvisioning(t *testing.T) {
 			assert.NoError(t, err)
 			assert.NotEqual(t, int64(-1), localUserID, "oauth_users row should link the newly created account")
 
+			// require, not assert: GetUserByID can return a nil *User on
+			// error, and user.Username below would panic the whole test
+			// binary on a nil pointer dereference if an assert-only failure
+			// let execution continue past a failed lookup.
 			user, err := ds.GetUserByID(localUserID)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 			assert.Equal(t, "jitsmith", user.Username)
 
 			var maxBlogs sql.NullInt64
@@ -647,10 +651,16 @@ func TestViewOauthCallbackJITProvisioning(t *testing.T) {
 // HashTokenParams, since this route specifically is meant to be closed in
 // code, for good: the OAuth path's only door is the oauth_preauth-gated JIT
 // branch in viewOauthCallback. This is NOT the same as self-serve signup
-// being closed instance-wide -- POST /api/auth/signup and POST /auth/signup
-// (routes.go) remain registered unconditionally and stay open at the
-// application level, gated only by open_registration in config plus a
-// HAProxy ACL outside this repo, not by any preauth check. See FORK.md.
+// being closed instance-wide -- two other signup routes exist and neither is
+// closed by this fork's code: POST /api/auth/signup (routes.go) IS gated by
+// open_registration at route-registration time (the handler isn't mounted
+// at all when open_registration is false), but POST /auth/signup
+// (routes.go) is registered UNCONDITIONALLY, and its in-app check only
+// rejects when open_registration is false AND the submitted invite_code is
+// empty -- any non-empty invite_code bypasses it, unchecked against the
+// database. So open_registration provides no real protection on
+// /auth/signup; the only actual gate on that route in this deployment is an
+// external HAProxy ACL outside this repo. See FORK.md's "Known limits".
 //
 // This calls configureOauthRoutes directly against a bare router, rather than
 // the real InitRoutes: InitRoutes also registers a catch-all blog-post-reader

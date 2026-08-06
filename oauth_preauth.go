@@ -230,9 +230,31 @@ func normalizeOauthUsername(mastodonUsername, remoteUserID string, taken func(st
 	}
 	// Extremely unlikely — the base is also colliding with the suffixed form,
 	// e.g. someone already registered literally "jsmith-14882". Fall back to
-	// a form keyed purely on the remote ID, which is unique by construction.
-	// (This form is not itself run back through taken(): "user-<remoteUserID>"
-	// cannot collide with the reserved-word list, which only matches exact
-	// literals, and remote IDs are unique by construction.)
-	return "user-" + remoteUserID
+	// a form keyed purely on the remote ID.
+	//
+	// This tier is NOT actually unique by construction, despite the remote ID
+	// itself being unique: a pre-existing account/collection/post literally
+	// named "user-<remoteUserID>" is reachable (e.g. via the orphan-retry
+	// scenario described above, or via /auth/signup's invite-code bypass --
+	// see FORK.md's "Known limits"), and taken() folds exactly that kind of
+	// occupancy in alongside plain username collisions. So run this tier
+	// through taken() too, like every other tier, rather than assuming it
+	// away. If it's ALSO occupied there is no further fallback tier -- the
+	// caller's CreateUser call is about to 409 -- so log loudly here with
+	// enough to actually find the collision, then return the value anyway:
+	// the caller already logs the CreateUser failure itself (see
+	// viewOauthCallback in oauth.go), this just makes that failure
+	// explicable instead of an opaque 500.
+	final := "user-" + remoteUserID
+	if taken(final) {
+		// This fork's JIT provisioning only ever has one identity source --
+		// Mastodon via the generic OAuth provider -- the same fact
+		// handleSetMastodonUserMaxBlogs (also in this file) hardcodes as
+		// provider := "generic". normalizeOauthUsername itself takes no
+		// provider parameter (see the doc comment above: deliberately
+		// decoupled from config), so that's stated directly here rather than
+		// threaded through as an argument.
+		log.Error("oauth JIT: normalizeOauthUsername exhausted every fallback tier -- %q (provider generic, remote user %s) is ALSO taken; CreateUser is about to 409 with no further fallback available", final, remoteUserID)
+	}
+	return final
 }

@@ -53,37 +53,38 @@ Three extra steps, each earned by something that already bit us or nearly did:
 
 ## Known upstream test failures
 
-CI skips exactly these two **subtests** by their fully slash-qualified path
+CI skips exactly this one **subtest** by its fully slash-qualified path
 (see `.github/workflows/ci.yml`'s `Test` step — the `/subtest` qualifier matters:
 without it, `-skip` matches the parent test name and drops every subtest beneath
 it, e.g. all five of `TestUpdatesRoundTrip`'s subtests instead of just the one
-that's broken). Both are pre-existing at v0.17.1, in files outside the
+that's broken). It is pre-existing at v0.17.1, in a file outside the
 merge-surface budget above, and unrelated to anything in this fork:
 
-- `TestViewOauthCallback/success` (`oauth_test.go`) — **not** the pre-existing,
-  fork-unrelated case this used to be. This subtest predates the fork's OAuth
-  JIT provisioning work (`oauth.go`, `oauth_preauth.go`) and is now stale: the
-  JIT branch runs unconditionally before the registration-blocked branch this
-  subtest was written to exercise, and calls `app.db.GetOauthPreauth` via the
-  concrete `*datastore` — a call this subtest's intentionally-nil `app.db`
-  can't serve, so it panics instead of returning the redirect the test
-  expects. A panic here aborts the whole package test binary, which would
-  silently take this fork's own `TestViewOauthCallbackJITProvisioning` and
-  `TestOauthSignupRouteIsNotRegistered` down with it. The subtest now carries
-  its own `t.Skip` with this explanation, so removing this entry from CI's
-  `-skip` flag is safe and does **not** revive the old risk — see the
-  in-file comment for the authoritative reasoning.
 - `TestUpdatesRoundTrip/Release_URL` (`updates_test.go`) — a race: the cache's
   version-check network call runs in an unsynchronized goroutine, and the
   `Release_URL` subtest reads the result before it's populated. The other four
   subtests (`New_Updates_Cache`, `Check_Now`, `Are_Available`, `Latest_Version`)
   are unaffected and run normally.
 
-Revisit both on every upstream merge. Delete the `TestUpdatesRoundTrip/Release_URL`
-entry the moment a release fixes the underlying race. The
-`TestViewOauthCallback/success` entry may be deleted at any time without
-re-checking anything — the in-code `t.Skip` is now what actually prevents the
-panic, not this flag.
+Revisit on every upstream merge. Delete this entry the moment a release fixes
+the underlying race.
+
+`TestViewOauthCallback/success` (`oauth_test.go`) used to have a matching
+entry here too, for a rationale that went stale (a pre-existing,
+fork-unrelated redirect-assertion mismatch) and was superseded by a different,
+current problem: this subtest predates the fork's OAuth JIT provisioning work
+(`oauth.go`, `oauth_preauth.go`), and the JIT branch now runs unconditionally
+before the registration-blocked branch this subtest was written to exercise,
+calling `app.db.GetOauthPreauth` via the concrete `*datastore` — a call this
+subtest's intentionally-nil `app.db` can't serve, so it panics instead of
+returning the redirect the test expects. A panic here would abort the whole
+package test binary, silently taking this fork's own
+`TestViewOauthCallbackJITProvisioning` and `TestOauthSignupRouteIsNotRegistered`
+down with it. The subtest now carries its own `t.Skip` (`oauth_test.go`) with
+this explanation, which fully supersedes the CI-level entry, so the entry has
+been removed from `-skip` rather than kept for history. If a future upstream
+merge changes this subtest enough that the in-code skip stops applying, judge
+it fresh rather than restoring a CI-level entry on the old rationale.
 
 ## CI divergence
 
@@ -119,10 +120,25 @@ one-way — so an overshoot gets caught and reconciled rather than silently
 persisting.
 
 **In-app self-serve signup is closed by infrastructure, not by this repo.**
-`POST /api/auth/signup` and `POST /auth/signup` (`routes.go`) remain registered
-unconditionally regardless of any OAuth work — they are gated only by
-`open_registration` in config plus a HAProxy ACL that lives entirely outside
-this repository, not by any preauth check. Only the OAuth JIT path (`oauth.go`,
-`oauth_preauth.go`) enforces its access gate in code, unconditionally, via the
-`oauth_preauth` table. Don't conflate the two when reasoning about what's
-"closed" on this instance.
+Two signup routes exist (`routes.go`) and they are not equivalent:
+
+- `POST /api/auth/signup` IS gated by `open_registration` in config, at
+  route-registration time — the handler is only mounted at all when
+  `open_registration` is true.
+- `POST /auth/signup` is registered UNCONDITIONALLY, regardless of
+  `open_registration`. Its in-app check (`unregisteredusers.go`'s
+  `handleWebSignup`) only rejects when `open_registration` is false AND the
+  submitted `invite_code` form field is empty — ANY non-empty `invite_code`
+  bypasses that check. The code is never validated against the database
+  before the account is created: `account.go`'s `signupWithRegistration`
+  calls `CreateUser` first, and only afterward calls `database.go`'s
+  `CreateInvitedUser`, which is a bare insert into `usersinvited` recording
+  that this user supplied some invite code string — it does not check that
+  the code exists, is unexpired, or is unused. So `open_registration = false`
+  provides no real protection on `/auth/signup` at all; the only actual gate
+  on that route in this deployment is an external HAProxy ACL that lives
+  entirely outside this repository, not any config value in this app.
+
+Only the OAuth JIT path (`oauth.go`, `oauth_preauth.go`) enforces its access
+gate in code, unconditionally, via the `oauth_preauth` table. Don't conflate
+any of these when reasoning about what's "closed" on this instance.
