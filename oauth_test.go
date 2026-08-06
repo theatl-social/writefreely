@@ -20,11 +20,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gorilla/mux"
 	"github.com/gorilla/sessions"
 	"github.com/stretchr/testify/assert"
 	"github.com/writeas/impart"
 	"github.com/writeas/web-core/id"
 	"github.com/writefreely/writefreely/config"
+	"github.com/writefreely/writefreely/key"
 )
 
 type MockOAuthDatastoreProvider struct {
@@ -464,5 +466,112 @@ func TestViewOauthCallbackJITProvisioning(t *testing.T) {
 			assert.True(t, found, "the preauth row must survive untouched — JIT logic must not run a second time")
 			assert.Equal(t, 9, limit)
 		})
+
+		t.Run("username collides with an existing collection alias: suffixed fallback used, no lockout", func(t *testing.T) {
+			const remoteUserID = "jit-44444"
+			const provider = "generic"
+			const clientID = "client-jit-4"
+
+			// A pre-existing, unrelated user owns a blog (collection) whose
+			// alias is the exact string this Mastodon identity's username will
+			// normalize to. No user is named "colliduser" -- only a collection
+			// alias is taken -- so a taken() check that only queries
+			// users.username (as originally written) would report this as
+			// available. CreateUser would then fail on the collections.alias
+			// uniqueness constraint (database.go's INSERT INTO collections),
+			// and because taken() had already said "available", every retry
+			// would hit the identical collision and this identity could never
+			// be provisioned.
+			res, err := ds.Exec(
+				"INSERT INTO users (username, password, email, created) VALUES (?, ?, ?, NOW())",
+				"collowner", "x", nil)
+			assert.NoError(t, err)
+			ownerID, err := res.LastInsertId()
+			assert.NoError(t, err)
+			_, err = ds.Exec(
+				"INSERT INTO collections (alias, title, description, privacy, owner_id, view_count) VALUES (?, ?, '', 1, ?, 0)",
+				"colliduser", "colliduser", ownerID)
+			assert.NoError(t, err)
+
+			assert.NoError(t, ds.UpsertOauthPreauth(remoteUserID, provider, clientID, 5))
+
+			state, err := ds.GenerateOAuthState(context.Background(), provider, clientID, 0, "")
+			assert.NoError(t, err)
+
+			h := newHandler(clientID, mockRoundTrip(remoteUserID, "colliduser"))
+			req, rr := callbackRequest(t, state)
+
+			err = h.viewOauthCallback(app, rr, req)
+			assert.NoError(t, err)
+			assert.Equal(t, http.StatusTemporaryRedirect, rr.Code,
+				"provisioning must still succeed via the suffixed fallback, not fail or lock out")
+
+			localUserID, err := ds.GetIDForRemoteUser(context.Background(), remoteUserID, provider, clientID)
+			assert.NoError(t, err)
+			assert.NotEqual(t, int64(-1), localUserID)
+
+			user, err := ds.GetUserByID(localUserID)
+			assert.NoError(t, err)
+			assert.Equal(t, "colliduser-"+remoteUserID, user.Username,
+				"the collection-alias collision should have been caught, forcing the ID-suffixed fallback tier")
+
+			_, found, err := ds.GetOauthPreauth(remoteUserID, provider, clientID)
+			assert.NoError(t, err)
+			assert.False(t, found)
+		})
 	})
+}
+
+// TestOauthSignupRouteIsNotRegistered guards the fix for a critical finding:
+// POST /oauth/signup (viewOauthSignup, oauth_signup.go) creates accounts via
+// CreateUser -> RecordRemoteUserID -> loginOrFail with NO oauth_preauth check
+// and no OpenRegistration check. Its only gate, HashTokenParams, is an HMAC
+// keyed on Config.Server.HashSeed -- unset (empty string) anywhere in this
+// fork's config, making the signature trivially forgeable by anyone who wants
+// to compute sha256("" + their own chosen form values). Before this task, the
+// route was dormant because no [oauth.*] provider was ever configured; this
+// task's own config change (enabling [oauth.generic] so JIT can work) is what
+// would have activated it. The fix removes the route registration entirely
+// (oauth.go's configureOauthRoutes) rather than trying to patch
+// HashTokenParams, since self-serve signup is permanently closed by design.
+//
+// This calls configureOauthRoutes directly against a bare router, rather than
+// the real InitRoutes: InitRoutes also registers a catch-all blog-post-reader
+// route (template "/{prefix}{collection}/{slug}", no method restriction) that
+// happens to structurally match "/oauth/signup" too (as collection="oauth",
+// slug="signup") -- confirmed by hand with router.Walk. Matching against the
+// full router would make router.Match true regardless of whether the signup
+// route itself is registered, for a reason that has nothing to do with this
+// fix, and silently prove nothing. Testing configureOauthRoutes in isolation
+// checks the actual thing the fix changed.
+func TestOauthSignupRouteIsNotRegistered(t *testing.T) {
+	cfg := config.New()
+	app := &App{cfg: cfg, keys: &key.Keychain{EmailKey: []byte("0123456789abcdef")}}
+	handler := NewHandler(app)
+
+	oauthClient := writeAsOauthClient{
+		ClientID:         "development",
+		ClientSecret:     "development",
+		ExchangeLocation: "https://write.as/oauth/token",
+		InspectLocation:  "https://write.as/oauth/inspect",
+		AuthLocation:     "https://write.as/oauth/login",
+		CallbackLocation: "http://localhost/oauth/callback",
+	}
+
+	router := mux.NewRouter()
+	configureOauthRoutes(handler, router, app, oauthClient, nil)
+
+	// Sanity check: confirm configureOauthRoutes actually registered
+	// something, so a "no match" result below means the signup route
+	// specifically is absent, not that this test built an empty router.
+	initReq := httptest.NewRequest("GET", "/oauth/write.as", nil)
+	var initMatch mux.RouteMatch
+	assert.True(t, router.Match(initReq, &initMatch),
+		"sanity check: GET /oauth/write.as should resolve, confirming configureOauthRoutes ran")
+
+	req := httptest.NewRequest("POST", "/oauth/signup", nil)
+	var match mux.RouteMatch
+	assert.False(t, router.Match(req, &match),
+		"POST /oauth/signup must NOT resolve -- its only gate is forgeable with an empty HashSeed, "+
+			"and self-serve account creation is permanently closed by design")
 }

@@ -322,7 +322,15 @@ func configureOauthRoutes(parentHandler *Handler, r *mux.Router, app *App, oauth
 	}
 	r.HandleFunc("/oauth/"+oauthClient.GetProvider(), parentHandler.OAuth(handler.viewOauthInit)).Methods("GET")
 	r.HandleFunc("/oauth/callback/"+oauthClient.GetProvider(), parentHandler.OAuth(handler.viewOauthCallback)).Methods("GET")
-	r.HandleFunc("/oauth/signup", parentHandler.OAuth(handler.viewOauthSignup)).Methods("POST")
+	// theATL fork: the manual-signup POST route is deliberately NOT registered.
+	// viewOauthSignup's only gate is HashTokenParams, an HMAC keyed on
+	// h.Config.Server.HashSeed -- which is unset (empty string) in this fork's
+	// config, making that signature trivially forgeable. Self-serve signup is
+	// permanently closed by design (see FORK.md and the design spec's
+	// Non-goals): the only door is the oauth_preauth-gated JIT branch in
+	// viewOauthCallback. viewOauthSignup/validateOauthSignup/
+	// showOauthSignupPage/HashTokenParams remain in oauth_signup.go, unrouted
+	// but still valid Go -- Go does not error on unreachable handler methods.
 }
 
 func (h oauthHandler) viewOauthCallback(app *App, w http.ResponseWriter, r *http.Request) error {
@@ -407,9 +415,23 @@ func (h oauthHandler) viewOauthCallback(app *App, w http.ResponseWriter, r *http
 		return impart.HTTPError{http.StatusInternalServerError, err.Error()}
 	}
 	if eligible {
+		// CreateUser enforces uniqueness of this string against THREE tables,
+		// not just users.username: collections.alias (INSERT INTO collections,
+		// database.go ~line 248, rolls back and returns 409 on collision) and
+		// posts.id via PostIDExists (database.go ~line 215, checked up front,
+		// also 409). taken() must cover all three, or a collision against a
+		// collection alias or post ID that GetUserForAuth alone can't see
+		// reports "available" when it isn't -- normalizeOauthUsername never
+		// tries its suffixed fallback, and every retry then hits the identical
+		// collision, locking that member out permanently.
 		username := normalizeOauthUsername(tokenInfo.Username, tokenInfo.UserID, func(u string) bool {
-			_, err := app.db.GetUserForAuth(u)
-			return err == nil
+			if _, err := app.db.GetUserForAuth(u); err == nil {
+				return true
+			}
+			if _, err := app.db.GetCollection(u); err == nil {
+				return true
+			}
+			return app.db.PostIDExists(u)
 		})
 
 		newUser := &User{
@@ -423,6 +445,7 @@ func (h oauthHandler) viewOauthCallback(app *App, w http.ResponseWriter, r *http
 			Created:    time.Now().Truncate(time.Second).UTC(),
 		}
 		if err = h.DB.CreateUser(h.Config, newUser, tokenInfo.DisplayName, ""); err != nil {
+			log.Error("oauth JIT: CreateUser failed for %q (remote user %s, provider %s, client %s): %v", username, tokenInfo.UserID, provider, clientID, err)
 			return impart.HTTPError{http.StatusInternalServerError, err.Error()}
 		}
 		if err = app.db.SetUserMaxBlogs(newUser.Username, maxBlogs); err != nil {
@@ -432,6 +455,15 @@ func (h oauthHandler) viewOauthCallback(app *App, w http.ResponseWriter, r *http
 			// until the next allowance push or the nightly audit corrects it.
 		}
 		if err = h.DB.RecordRemoteUserID(r.Context(), newUser.ID, tokenInfo.UserID, provider, clientID, tokenResponse.AccessToken); err != nil {
+			// CreateUser has already committed users/collections rows at this
+			// point -- this is a partial failure, not a clean rollback. The
+			// account now exists but is unlinked, and normalizeOauthUsername's
+			// idempotency guarantee does NOT cover this case (see the caveat on
+			// its doc comment in oauth_preauth.go): a retry will see this
+			// username as taken and provision a SECOND, differently-named
+			// account rather than completing this one. Log loudly so this is
+			// discoverable and manually fixable rather than a silent 500.
+			log.Error("oauth JIT: created user id=%d username=%q but FAILED to link remote user %s (provider %s, client %s): %v -- this account is orphaned and needs manual reconciliation", newUser.ID, newUser.Username, tokenInfo.UserID, provider, clientID, err)
 			return impart.HTTPError{http.StatusInternalServerError, err.Error()}
 		}
 		if err = app.db.DeleteOauthPreauth(tokenInfo.UserID, provider, clientID); err != nil {

@@ -191,6 +191,16 @@ var invalidUsernameChars = regexp.MustCompile(`[^a-z0-9-]+`)
 // Deterministic and idempotent: the same Mastodon identity always resolves
 // to the same Write Freely username on retry, so a failed provisioning
 // attempt can safely be retried without producing a different account.
+//
+// That guarantee assumes the caller's CreateUser and RecordRemoteUserID calls
+// either both succeed or the caller has separately handled the partial-
+// failure case. If CreateUser succeeds but RecordRemoteUserID then fails, the
+// account it created is real and taken() will report its username as
+// occupied on any retry -- normalizeOauthUsername has no way to know that
+// account is orphaned, so a retry produces a SECOND, differently-suffixed
+// account instead of completing the first. viewOauthCallback logs loudly on
+// that specific failure so it is discoverable, but does not currently
+// reconcile it automatically.
 func normalizeOauthUsername(mastodonUsername, remoteUserID string, taken func(string) bool) string {
 	base := strings.ToLower(mastodonUsername)
 	base = invalidUsernameChars.ReplaceAllString(base, "-")
