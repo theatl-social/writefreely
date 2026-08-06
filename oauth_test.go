@@ -701,5 +701,7 @@ func TestOauthSignupRouteIsNotRegistered(t *testing.T) {
 	assert.False(t, router.Match(req, &match),
 		"POST /oauth/signup must NOT resolve -- its only gate is forgeable with an empty HashSeed, "+
 			"and this fork closes the OAuth self-serve path in code; it is not the app's only "+
-			"signup surface (POST /api/auth/signup and /auth/signup remain open, gated by infra -- see FORK.md)")
+			"signup surface (POST /api/auth/signup is gated by open_registration at route-registration "+
+			"time; POST /auth/signup is registered unconditionally and is gated only by an external "+
+			"HAProxy ACL, not by this app -- see FORK.md)")
 }

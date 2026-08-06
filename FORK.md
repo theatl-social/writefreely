@@ -33,10 +33,10 @@ the merge surface entirely.
 
 ## Merge policy
 
-Only `app.go`, `account.go`, `collections.go`, `routes.go`, and `posts.go` are
-modified, by one line or a short block each, all marked with `theATL fork:`
-comments. Merge upstream releases onto `theatl-main`; conflicts should be
-confined to those five files.
+Only `app.go`, `account.go`, `collections.go`, `routes.go`, `posts.go`, and
+`oauth.go` are modified, by one line or a short block each, all marked with
+`theATL fork:` comments. Merge upstream releases onto `theatl-main`; conflicts
+should be confined to those six files.
 
 Three extra steps, each earned by something that already bit us or nearly did:
 
@@ -49,7 +49,7 @@ Three extra steps, each earned by something that already bit us or nearly did:
   (gated at the handler), and `CreateCollectionFromToken` (`database.go:290`,
   zero callers). If upstream wires the third to a route, the cap silently gains
   a hole and `database.go` is off our budget.
-- **Bump the AGPL §5(a) notice count** — it is five files now.
+- **Bump the AGPL §5(a) notice count** — it is six files now.
 
 ## Known upstream test failures
 
