@@ -281,3 +281,27 @@ func TestMastodonUserMaxBlogsRouteIsRegistered(t *testing.T) {
 	assert.Equal(t, "54321", match.Vars["remoteUserID"],
 		"the {remoteUserID} path variable should capture the remote user ID segment")
 }
+
+func TestNormalizeOauthUsername(t *testing.T) {
+	noneTaken := func(string) bool { return false }
+
+	tests := []struct {
+		name       string
+		mastodon   string
+		remoteID   string
+		taken      func(string) bool
+		want       string
+	}{
+		{"simple lowercase alnum passes through", "jsmith", "14882", noneTaken, "jsmith"},
+		{"uppercase is lowered", "JSmith", "14882", noneTaken, "jsmith"},
+		{"underscore becomes hyphen", "j_smith", "14882", noneTaken, "j-smith"},
+		{"collision gets ID-suffixed", "jsmith", "14882", func(u string) bool { return u == "jsmith" }, "jsmith-14882"},
+		{"collision on the suffixed form too falls back to raw ID", "jsmith", "14882",
+			func(u string) bool { return u == "jsmith" || u == "jsmith-14882" }, "user-14882"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, normalizeOauthUsername(tc.mastodon, tc.remoteID, tc.taken))
+		})
+	}
+}

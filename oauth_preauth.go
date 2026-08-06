@@ -20,6 +20,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"regexp"
+	"strings"
 
 	"github.com/gorilla/mux"
 	"github.com/writeas/web-core/log"
@@ -177,4 +179,35 @@ func handleSetMastodonUserMaxBlogs(app *App) http.HandlerFunc {
 		log.Info("oauth_preauth: set %q to %d", remoteUserID, *body.MaxBlogs)
 		w.WriteHeader(http.StatusOK)
 	}
+}
+
+var invalidUsernameChars = regexp.MustCompile(`[^a-z0-9-]+`)
+
+// normalizeOauthUsername maps a Mastodon username onto a valid, available
+// Write Freely username. Write Freely requires 3+ characters, letters/
+// numbers/hyphens only (author.IsValidUsername) — Mastodon usernames may
+// contain underscores, which is not valid here, and may already be taken.
+//
+// Deterministic and idempotent: the same Mastodon identity always resolves
+// to the same Write Freely username on retry, so a failed provisioning
+// attempt can safely be retried without producing a different account.
+func normalizeOauthUsername(mastodonUsername, remoteUserID string, taken func(string) bool) string {
+	base := strings.ToLower(mastodonUsername)
+	base = invalidUsernameChars.ReplaceAllString(base, "-")
+	base = strings.Trim(base, "-")
+	if len(base) < 3 {
+		base = "user"
+	}
+
+	if !taken(base) {
+		return base
+	}
+	suffixed := base + "-" + remoteUserID
+	if !taken(suffixed) {
+		return suffixed
+	}
+	// Extremely unlikely — the base is also colliding with the suffixed form,
+	// e.g. someone already registered literally "jsmith-14882". Fall back to
+	// a form keyed purely on the remote ID, which is unique by construction.
+	return "user-" + remoteUserID
 }
