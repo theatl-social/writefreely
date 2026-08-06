@@ -626,6 +626,10 @@ func ConnectToDatabase(app *App) error {
 	if err := app.db.ensureMaxBlogsColumn(); err != nil {
 		return fmt.Errorf("ensure max_blogs column: %s", err)
 	}
+	// theATL fork: ensure the OAuth pre-authorization table exists. See FORK.md.
+	if err := app.db.ensureOauthPreauthTable(); err != nil {
+		return fmt.Errorf("ensure oauth_preauth table: %s", err)
+	}
 	// theATL fork: log the resolved fallback so a missing or misspelled
 	// max_blogs is visible at boot rather than silently unlimited. See FORK.md.
 	log.Info("max_blogs: per-user fallback is %d (0 means unlimited)", app.cfg.App.MaxBlogs)
