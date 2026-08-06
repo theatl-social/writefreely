@@ -23,6 +23,7 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/gorilla/sessions"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/writeas/impart"
 	"github.com/writeas/web-core/id"
 	"github.com/writefreely/writefreely/config"
@@ -220,6 +221,32 @@ func TestViewOauthInit(t *testing.T) {
 
 func TestViewOauthCallback(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
+		// theATL fork: this upstream subtest is stale, not just skipped in CI
+		// for a benign reason. It predates the fork's JIT branch in
+		// viewOauthCallback (oauth.go), which now runs unconditionally BEFORE
+		// the registration-blocked branch this subtest was written to reach,
+		// and calls app.db.GetOauthPreauth via the concrete *datastore -- a
+		// call this subtest's app (built below with a nil db field) cannot
+		// serve, so it panics (nil pointer dereference) rather than returning
+		// the redirect the assertions below expect. That panic aborts the
+		// entire package test binary, silently taking every other test in it
+		// down too -- including this fork's two JIT/security regression tests
+		// -- which is exactly the failure mode CI's `-skip` flag was masking.
+		//
+		// A real *datastore doesn't rescue this subtest either: with no
+		// oauth_preauth row for this identity, the JIT branch now correctly
+		// returns 403 Forbidden, not the 307 redirect this subtest asserts --
+		// upstream's assumption that an unrecognized OAuth identity falls
+		// through to open registration no longer holds in this fork by
+		// design. See TestViewOauthCallbackJITProvisioning for coverage of
+		// the actual current behavior, and FORK.md for the JIT design.
+		//
+		// Skipping in-code (rather than relying solely on ci.yml's `-skip`
+		// flag) so a future maintainer who removes that flag -- reasonably,
+		// since its documented rationale no longer describes reality -- can't
+		// silently reintroduce the panic and disable the JIT tests with it.
+		t.Skip("stale upstream subtest: superseded by the fork's unconditional JIT gate in oauth.go; see comment above and TestViewOauthCallbackJITProvisioning")
+
 		app := &MockOAuthDatastoreProvider{}
 		h := oauthHandler{
 			Config:   app.Config(),
@@ -507,17 +534,101 @@ func TestViewOauthCallbackJITProvisioning(t *testing.T) {
 				"provisioning must still succeed via the suffixed fallback, not fail or lock out")
 
 			localUserID, err := ds.GetIDForRemoteUser(context.Background(), remoteUserID, provider, clientID)
-			assert.NoError(t, err)
-			assert.NotEqual(t, int64(-1), localUserID)
+			require.NoError(t, err)
+			require.NotEqual(t, int64(-1), localUserID)
 
+			// require, not assert: GetUserByID can return a nil *User on
+			// error, and user.Username below would panic the whole test
+			// binary on a nil pointer dereference if an assert-only failure
+			// let execution continue past a failed lookup.
 			user, err := ds.GetUserByID(localUserID)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 			assert.Equal(t, "colliduser-"+remoteUserID, user.Username,
 				"the collection-alias collision should have been caught, forcing the ID-suffixed fallback tier")
 
 			_, found, err := ds.GetOauthPreauth(remoteUserID, provider, clientID)
 			assert.NoError(t, err)
 			assert.False(t, found)
+		})
+
+		// The following two subtests cover an adversarial-review finding: the
+		// JIT path's taken() closure (oauth.go) originally checked only
+		// WriteFreely's uniqueness constraints, never author.IsValidUsername
+		// -- the same gate account.go, app.go, collections.go, and
+		// database.go all apply to every OTHER account-creation path. That
+		// let a Mastodon username of "admin" or "login" get JIT-provisioned
+		// verbatim (a reserved, impersonation-prone name on a public
+		// instance), and let a too-short Mastodon username fall back to the
+		// hardcoded literal "user" -- itself also reserved, and previously
+		// accepted unconditionally rather than being suffixed.
+		for _, reserved := range []string{"admin", "login"} {
+			reserved := reserved
+			t.Run(fmt.Sprintf("mastodon username %q is reserved: never assigned verbatim", reserved), func(t *testing.T) {
+				remoteUserID := "jit-reserved-" + reserved
+				const provider = "generic"
+				clientID := "client-jit-reserved-" + reserved
+
+				require.NoError(t, ds.UpsertOauthPreauth(remoteUserID, provider, clientID, 1))
+
+				state, err := ds.GenerateOAuthState(context.Background(), provider, clientID, 0, "")
+				require.NoError(t, err)
+
+				h := newHandler(clientID, mockRoundTrip(remoteUserID, reserved))
+				req, rr := callbackRequest(t, state)
+
+				err = h.viewOauthCallback(app, rr, req)
+				require.NoError(t, err)
+				assert.Equal(t, http.StatusTemporaryRedirect, rr.Code)
+
+				localUserID, err := ds.GetIDForRemoteUser(context.Background(), remoteUserID, provider, clientID)
+				require.NoError(t, err)
+				require.NotEqual(t, int64(-1), localUserID)
+
+				user, err := ds.GetUserByID(localUserID)
+				require.NoError(t, err)
+				assert.NotEqual(t, reserved, user.Username,
+					"a reserved/impersonation-prone name must never be assigned verbatim to a JIT-provisioned account")
+				assert.Equal(t, reserved+"-"+remoteUserID, user.Username,
+					"taken() must treat a reserved name as occupied, routing it through the same ID-suffixed fallback tier as an ordinary collision")
+
+				var n int
+				require.NoError(t, ds.QueryRow("SELECT COUNT(*) FROM users WHERE username = ?", reserved).Scan(&n))
+				assert.Equal(t, 0, n, "no user row may ever be named exactly %q", reserved)
+			})
+		}
+
+		t.Run("short (<3 char) mastodon username: does not land on the reserved word \"user\"", func(t *testing.T) {
+			const remoteUserID = "jit-55555"
+			const provider = "generic"
+			const clientID = "client-jit-5"
+			const shortName = "jo" // 2 chars: below author.IsValidUsername's MinUsernameLen floor
+
+			require.NoError(t, ds.UpsertOauthPreauth(remoteUserID, provider, clientID, 1))
+
+			state, err := ds.GenerateOAuthState(context.Background(), provider, clientID, 0, "")
+			require.NoError(t, err)
+
+			h := newHandler(clientID, mockRoundTrip(remoteUserID, shortName))
+			req, rr := callbackRequest(t, state)
+
+			err = h.viewOauthCallback(app, rr, req)
+			require.NoError(t, err)
+			assert.Equal(t, http.StatusTemporaryRedirect, rr.Code)
+
+			localUserID, err := ds.GetIDForRemoteUser(context.Background(), remoteUserID, provider, clientID)
+			require.NoError(t, err)
+			require.NotEqual(t, int64(-1), localUserID)
+
+			user, err := ds.GetUserByID(localUserID)
+			require.NoError(t, err)
+			assert.NotEqual(t, "user", user.Username,
+				"a too-short mastodon username must not fall back to the reserved literal \"user\"")
+			assert.Equal(t, shortName+"-"+remoteUserID, user.Username,
+				"taken() must treat a too-short base as occupied, routing it through the ID-suffixed fallback tier using the ORIGINAL base, not a hardcoded literal")
+
+			var n int
+			require.NoError(t, ds.QueryRow("SELECT COUNT(*) FROM users WHERE username = ?", "user").Scan(&n))
+			assert.Equal(t, 0, n, "no user row may ever be named exactly \"user\" as a result of this provisioning")
 		})
 	})
 }
@@ -533,7 +644,13 @@ func TestViewOauthCallbackJITProvisioning(t *testing.T) {
 // task's own config change (enabling [oauth.generic] so JIT can work) is what
 // would have activated it. The fix removes the route registration entirely
 // (oauth.go's configureOauthRoutes) rather than trying to patch
-// HashTokenParams, since self-serve signup is permanently closed by design.
+// HashTokenParams, since this route specifically is meant to be closed in
+// code, for good: the OAuth path's only door is the oauth_preauth-gated JIT
+// branch in viewOauthCallback. This is NOT the same as self-serve signup
+// being closed instance-wide -- POST /api/auth/signup and POST /auth/signup
+// (routes.go) remain registered unconditionally and stay open at the
+// application level, gated only by open_registration in config plus a
+// HAProxy ACL outside this repo, not by any preauth check. See FORK.md.
 //
 // This calls configureOauthRoutes directly against a bare router, rather than
 // the real InitRoutes: InitRoutes also registers a catch-all blog-post-reader
@@ -573,5 +690,6 @@ func TestOauthSignupRouteIsNotRegistered(t *testing.T) {
 	var match mux.RouteMatch
 	assert.False(t, router.Match(req, &match),
 		"POST /oauth/signup must NOT resolve -- its only gate is forgeable with an empty HashSeed, "+
-			"and self-serve account creation is permanently closed by design")
+			"and this fork closes the OAuth self-serve path in code; it is not the app's only "+
+			"signup surface (POST /api/auth/signup and /auth/signup remain open, gated by infra -- see FORK.md)")
 }

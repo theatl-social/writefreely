@@ -298,6 +298,41 @@ func TestNormalizeOauthUsername(t *testing.T) {
 		{"collision gets ID-suffixed", "jsmith", "14882", func(u string) bool { return u == "jsmith" }, "jsmith-14882"},
 		{"collision on the suffixed form too falls back to raw ID", "jsmith", "14882",
 			func(u string) bool { return u == "jsmith" || u == "jsmith-14882" }, "user-14882"},
+
+		// The following cases simulate what the real production taken()
+		// closure in oauth.go does since the fix for a reserved-name bypass:
+		// it now reports author.IsValidUsername failures (reserved words,
+		// too-short names) as "taken" too, not just genuine uniqueness
+		// collisions against WriteFreely's own tables. normalizeOauthUsername
+		// itself stays decoupled from author/config -- these taken() stand-
+		// ins are what let this stay a fast, DB-less unit test while still
+		// proving the fallback-tier routing an invalid/reserved base needs.
+		{
+			"reserved word (as flagged by taken()) is never returned verbatim",
+			"admin", "77",
+			func(u string) bool { return u == "admin" }, // stands in for author.IsValidUsername rejecting "admin"
+			"admin-77",
+		},
+		{
+			"another reserved word (as flagged by taken()) is never returned verbatim",
+			"login", "77",
+			func(u string) bool { return u == "login" },
+			"login-77",
+		},
+		{
+			// Regression guard for the hardcoded `if len(base) < 3 { base =
+			// "user" }` this function used to have: that literal "user" is
+			// ITSELF reserved, and was substituted in before any taken()
+			// check ran, so it could be (and empirically was) handed out
+			// verbatim. There is now no such hardcoded substitution --
+			// short-ness is caught by taken() like everything else, and the
+			// suffixed fallback uses the ORIGINAL (too-short) base, never
+			// the literal "user".
+			"short base (as flagged by taken()) does not fall back to the reserved literal \"user\"",
+			"jo", "99",
+			func(u string) bool { return len(u) < 3 }, // stands in for author.IsValidUsername's MinUsernameLen floor
+			"jo-99",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

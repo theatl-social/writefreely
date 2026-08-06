@@ -29,6 +29,7 @@ import (
 	"github.com/gorilla/sessions"
 	"github.com/writeas/impart"
 	"github.com/writeas/web-core/log"
+	"github.com/writefreely/writefreely/author"
 	"github.com/writefreely/writefreely/config"
 )
 
@@ -325,12 +326,17 @@ func configureOauthRoutes(parentHandler *Handler, r *mux.Router, app *App, oauth
 	// theATL fork: the manual-signup POST route is deliberately NOT registered.
 	// viewOauthSignup's only gate is HashTokenParams, an HMAC keyed on
 	// h.Config.Server.HashSeed -- which is unset (empty string) in this fork's
-	// config, making that signature trivially forgeable. Self-serve signup is
-	// permanently closed by design (see FORK.md and the design spec's
-	// Non-goals): the only door is the oauth_preauth-gated JIT branch in
-	// viewOauthCallback. viewOauthSignup/validateOauthSignup/
-	// showOauthSignupPage/HashTokenParams remain in oauth_signup.go, unrouted
-	// but still valid Go -- Go does not error on unreachable handler methods.
+	// config, making that signature trivially forgeable. This route, and only
+	// this route, is closed in code: the OAuth path's only door is the
+	// oauth_preauth-gated JIT branch in viewOauthCallback below. That is NOT
+	// the same as "self-serve signup is closed instance-wide" -- POST
+	// /api/auth/signup and POST /auth/signup (routes.go) remain registered
+	// unconditionally and stay open at the application level, gated only by
+	// open_registration in config plus a HAProxy ACL that lives entirely
+	// outside this repo, not by any preauth check. See FORK.md.
+	// viewOauthSignup/validateOauthSignup/showOauthSignupPage/HashTokenParams
+	// remain in oauth_signup.go, unrouted but still valid Go -- Go does not
+	// error on unreachable handler methods.
 }
 
 func (h oauthHandler) viewOauthCallback(app *App, w http.ResponseWriter, r *http.Request) error {
@@ -424,7 +430,22 @@ func (h oauthHandler) viewOauthCallback(app *App, w http.ResponseWriter, r *http
 		// reports "available" when it isn't -- normalizeOauthUsername never
 		// tries its suffixed fallback, and every retry then hits the identical
 		// collision, locking that member out permanently.
+		//
+		// taken() must ALSO cover validity, not just uniqueness: every other
+		// account-creation path in this codebase (account.go, app.go,
+		// collections.go, database.go) gates on author.IsValidUsername, which
+		// rejects both too-short names and a reserved-word list ("admin",
+		// "login", "user", ...) that nothing in WriteFreely's own uniqueness
+		// tables would ever flag as occupied. Without this, the JIT path could
+		// hand a real Mastodon member a reserved/impersonation-prone username
+		// (e.g. "admin") purely because no WriteFreely account happened to be
+		// sitting on it yet. Treating "invalid" the same as "taken" here makes
+		// normalizeOauthUsername's existing suffix-fallback tiers route around
+		// it automatically -- no separate reserved-word logic needed there.
 		username := normalizeOauthUsername(tokenInfo.Username, tokenInfo.UserID, func(u string) bool {
+			if !author.IsValidUsername(h.Config, u) {
+				return true
+			}
 			if _, err := app.db.GetUserForAuth(u); err == nil {
 				return true
 			}
@@ -478,8 +499,11 @@ func (h oauthHandler) viewOauthCallback(app *App, w http.ResponseWriter, r *http
 	}
 
 	// Not eligible: no account is created. This must NOT fall through to
-	// showOauthSignupPage -- that is self-serve signup, permanently closed. See
-	// the design spec's Non-goals.
+	// showOauthSignupPage -- the OAuth path's only door is the preauth check
+	// above, enforced unconditionally in code. (In-app self-serve signup, POST
+	// /api/auth/signup and POST /auth/signup, remains open at the application
+	// level and is blocked only by a HAProxy ACL outside this repo -- see
+	// FORK.md. That infra dependency has no bearing on this OAuth code path.)
 	return impart.HTTPError{http.StatusForbidden, "This Mastodon account is not currently linked to an active theATL.social membership. If you believe this is an error, check your membership status at members.theatl.social."}
 
 	// New user registration below.

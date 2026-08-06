@@ -60,18 +60,30 @@ it, e.g. all five of `TestUpdatesRoundTrip`'s subtests instead of just the one
 that's broken). Both are pre-existing at v0.17.1, in files outside the
 merge-surface budget above, and unrelated to anything in this fork:
 
-- `TestViewOauthCallback/success` (`oauth_test.go`) — the test's mock config never
-  sets `App.OpenRegistration`, so `oauth.go`'s registration-blocked branch fires
-  and returns a redirect the test doesn't expect. (Only subtest on this test
-  today; qualified anyway so it stays correct if upstream adds more.)
+- `TestViewOauthCallback/success` (`oauth_test.go`) — **not** the pre-existing,
+  fork-unrelated case this used to be. This subtest predates the fork's OAuth
+  JIT provisioning work (`oauth.go`, `oauth_preauth.go`) and is now stale: the
+  JIT branch runs unconditionally before the registration-blocked branch this
+  subtest was written to exercise, and calls `app.db.GetOauthPreauth` via the
+  concrete `*datastore` — a call this subtest's intentionally-nil `app.db`
+  can't serve, so it panics instead of returning the redirect the test
+  expects. A panic here aborts the whole package test binary, which would
+  silently take this fork's own `TestViewOauthCallbackJITProvisioning` and
+  `TestOauthSignupRouteIsNotRegistered` down with it. The subtest now carries
+  its own `t.Skip` with this explanation, so removing this entry from CI's
+  `-skip` flag is safe and does **not** revive the old risk — see the
+  in-file comment for the authoritative reasoning.
 - `TestUpdatesRoundTrip/Release_URL` (`updates_test.go`) — a race: the cache's
   version-check network call runs in an unsynchronized goroutine, and the
   `Release_URL` subtest reads the result before it's populated. The other four
   subtests (`New_Updates_Cache`, `Check_Now`, `Are_Available`, `Latest_Version`)
   are unaffected and run normally.
 
-Revisit both on every upstream merge and delete the corresponding `-skip` entry
-the moment a release fixes the underlying subtest.
+Revisit both on every upstream merge. Delete the `TestUpdatesRoundTrip/Release_URL`
+entry the moment a release fixes the underlying race. The
+`TestViewOauthCallback/success` entry may be deleted at any time without
+re-checking anything — the in-code `t.Skip` is now what actually prevents the
+panic, not this flag.
 
 ## CI divergence
 
@@ -105,3 +117,12 @@ detective, not preventive: the member site's nightly audit should compare each
 user's *actual* blog count against their allowance, not only push allowances
 one-way — so an overshoot gets caught and reconciled rather than silently
 persisting.
+
+**In-app self-serve signup is closed by infrastructure, not by this repo.**
+`POST /api/auth/signup` and `POST /auth/signup` (`routes.go`) remain registered
+unconditionally regardless of any OAuth work — they are gated only by
+`open_registration` in config plus a HAProxy ACL that lives entirely outside
+this repository, not by any preauth check. Only the OAuth JIT path (`oauth.go`,
+`oauth_preauth.go`) enforces its access gate in code, unconditionally, via the
+`oauth_preauth` table. Don't conflate the two when reasoning about what's
+"closed" on this instance.

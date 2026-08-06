@@ -185,8 +185,23 @@ var invalidUsernameChars = regexp.MustCompile(`[^a-z0-9-]+`)
 
 // normalizeOauthUsername maps a Mastodon username onto a valid, available
 // Write Freely username. Write Freely requires 3+ characters, letters/
-// numbers/hyphens only (author.IsValidUsername) — Mastodon usernames may
-// contain underscores, which is not valid here, and may already be taken.
+// numbers/hyphens only, and rejects a reserved-word list (all enforced by
+// author.IsValidUsername) — Mastodon usernames may contain underscores,
+// which is not valid here, may be too short, may collide with a reserved
+// name (e.g. "admin", "login"), and may already be taken.
+//
+// This function is deliberately decoupled from author.IsValidUsername and
+// config.Config: the caller's taken() closure is expected to fold validity
+// in alongside uniqueness (report an invalid or reserved candidate as
+// "taken" too), so that a too-short, malformed, or reserved base -- or the
+// empty string, if every character of the Mastodon username was stripped as
+// invalid -- is routed through the exact same suffix-fallback tiers below as
+// an ordinary uniqueness collision, rather than needing special-cased
+// handling here. In particular, this means there is no hardcoded minimum
+// length here: relying on taken() to reject a too-short base is what
+// prevents that short-name case from being special-cased onto a literal
+// fallback username that could itself collide with the reserved list (as a
+// hardcoded "user" literal once did).
 //
 // Deterministic and idempotent: the same Mastodon identity always resolves
 // to the same Write Freely username on retry, so a failed provisioning
@@ -205,9 +220,6 @@ func normalizeOauthUsername(mastodonUsername, remoteUserID string, taken func(st
 	base := strings.ToLower(mastodonUsername)
 	base = invalidUsernameChars.ReplaceAllString(base, "-")
 	base = strings.Trim(base, "-")
-	if len(base) < 3 {
-		base = "user"
-	}
 
 	if !taken(base) {
 		return base
@@ -219,5 +231,8 @@ func normalizeOauthUsername(mastodonUsername, remoteUserID string, taken func(st
 	// Extremely unlikely — the base is also colliding with the suffixed form,
 	// e.g. someone already registered literally "jsmith-14882". Fall back to
 	// a form keyed purely on the remote ID, which is unique by construction.
+	// (This form is not itself run back through taken(): "user-<remoteUserID>"
+	// cannot collide with the reserved-word list, which only matches exact
+	// literals, and remote IDs are unique by construction.)
 	return "user-" + remoteUserID
 }

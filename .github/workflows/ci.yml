@@ -99,15 +99,25 @@ jobs:
       # has five subtests (New Updates Cache, Release URL, Check Now, Are
       # Available, Latest Version) and only "Release URL" is broken.
       #
-      # - TestViewOauthCallback/success (oauth_test.go): the test's mock config
-      #   (built via config.New(), oauth_test.go:79-97) never sets
-      #   App.OpenRegistration, leaving it at the Go zero-value `false`. The
-      #   handler (oauth.go:399-404) then takes its registration-blocked branch
-      #   and returns `/login` as a redirect-encoded error, which the test's
-      #   assert.NoError flags as unexpected. Pre-existing at v0.17.1;
-      #   oauth.go/oauth_test.go are outside the three-file merge-surface budget.
-      #   (This test has only the one subtest today; qualified anyway so it
-      #   stays correct if upstream adds more.)
+      # - TestViewOauthCallback/success (oauth_test.go): STALE RATIONALE, kept
+      #   here only for history -- this subtest is no longer broken for the
+      #   reason once documented (a redirect-assertion mismatch from a
+      #   registration-blocked branch, pre-dating this fork's OAuth work).
+      #   It is now ALSO self-skipped in-code (an explicit t.Skip at the top
+      #   of the subtest, oauth_test.go) with the current, accurate reason:
+      #   the fork's JIT branch in oauth.go runs unconditionally before the
+      #   branch this subtest exercises, and calls app.db.GetOauthPreauth via
+      #   the concrete *datastore -- a call this subtest's intentionally-nil
+      #   app.db cannot serve, so without a fix it panics and aborts the
+      #   whole package test binary, silently taking this fork's own
+      #   TestViewOauthCallbackJITProvisioning and
+      #   TestOauthSignupRouteIsNotRegistered down with it. This entry in
+      #   `-skip` is now redundant with that in-code skip, not load-bearing:
+      #   removing it should be a no-op (the subtest reports SKIP either way).
+      #   Left in place mainly so this comment block doesn't need to shrink
+      #   awkwardly mid-explanation. See oauth_test.go's t.Skip call for the
+      #   authoritative, up-to-date reasoning -- do not resurrect the
+      #   OpenRegistration explanation above if this entry is ever revisited.
       #
       # - TestUpdatesRoundTrip/Release_URL (updates_test.go): newUpdatesCache
       #   (updates.go:98-105) launches its version-check network call in
@@ -120,8 +130,12 @@ jobs:
       #   outside the three-file merge-surface budget. The other four
       #   TestUpdatesRoundTrip subtests are unaffected and must keep running.
       #
-      # Revisit both on every upstream merge; delete the corresponding -skip
-      # entry the moment a release fixes the underlying subtest.
+      # Revisit both on every upstream merge. For TestUpdatesRoundTrip/Release_URL,
+      # delete the entry the moment a release fixes the underlying race. For
+      # TestViewOauthCallback/success, this entry may be deleted at any time --
+      # unlike the old assumption, doing so cannot silently disable this
+      # fork's security regression tests, because the in-code t.Skip is what
+      # actually prevents the panic now.
       - name: Test
         env:
           TEST_MYSQL: '1'
