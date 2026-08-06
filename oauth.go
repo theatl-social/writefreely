@@ -422,17 +422,65 @@ func (h oauthHandler) viewOauthCallback(app *App, w http.ResponseWriter, r *http
 	// theATL fork: just-in-time provisioning. If this Mastodon identity has a
 	// pending pre-authorization (pushed by the member site in advance), create
 	// the account now instead of falling through to the manual signup page.
-	// GetOauthPreauth/SetUserMaxBlogs/DeleteOauthPreauth/GetUserForAuth are
-	// defined only on the concrete *datastore (oauth_preauth.go, database.go),
-	// not on the h.DB field's narrower OAuthDatastore interface above, so they
-	// are reached via app.db here -- the same way the existing
-	// app.db.GetUserInvite call a few lines below already does. See FORK.md and
-	// the design spec's "Revision 2 — OAuth JIT Provisioning".
-	maxBlogs, eligible, err := app.db.GetOauthPreauth(tokenInfo.UserID, provider, clientID)
-	if err != nil {
-		return impart.HTTPError{http.StatusInternalServerError, err.Error()}
-	}
-	if eligible {
+	// GetOauthPreauth/SetUserMaxBlogs/DeleteOauthPreauth/GetUserForAuth/
+	// withOauthIdentityLock are defined only on the concrete *datastore
+	// (oauth_preauth.go, database.go), not on the h.DB field's narrower
+	// OAuthDatastore interface above, so they are reached via app.db here --
+	// the same way the existing app.db.GetUserInvite call a few lines below
+	// already does. See FORK.md and the design spec's "Revision 2 — OAuth JIT
+	// Provisioning".
+	//
+	// Everything from the re-check below through the preauth delete runs
+	// inside withOauthIdentityLock, keyed on this exact identity
+	// (tokenInfo.UserID, provider, clientID). Without it, this JIT path and
+	// handleSetMastodonUserMaxBlogs's check-then-write (oauth_preauth.go) can
+	// interleave: an allowance push can observe "not linked" (via
+	// GetIDForRemoteUser, same as the check at the top of this function) while
+	// a login for the same identity is concurrently creating the account,
+	// silently losing the push (200 OK, but the account keeps its OLD
+	// allowance) and resurrecting a preauth row against an identity that is
+	// now already provisioned -- see withOauthIdentityLock's doc comment
+	// (oauth_preauth.go) for the full race and why a plain transaction alone
+	// can't close it.
+	var jitHandled bool
+	lockErr := app.db.withOauthIdentityLock(ctx, tokenInfo.UserID, provider, clientID, func() error {
+		// Re-check linkage inside the lock: the GetIDForRemoteUser call above
+		// (before this lock was acquired) can be stale by the time we get
+		// here -- e.g. two near-simultaneous logins for the same Mastodon
+		// identity, or this login racing handleSetMastodonUserMaxBlogs, which
+		// takes this same per-identity lock before its own linked/not-linked
+		// branch. If someone else won that race and linked this identity
+		// while we waited for the lock, recover by logging the now-existing
+		// account in rather than creating a second, differently-suffixed
+		// duplicate.
+		relinkedID, err := h.DB.GetIDForRemoteUser(ctx, tokenInfo.UserID, provider, clientID)
+		if err != nil {
+			log.Error("Unable to GetIDForRemoteUser: %s", err)
+			return err
+		}
+		if relinkedID != -1 {
+			jitHandled = true
+			user, err := h.DB.GetUserByID(relinkedID)
+			if err != nil {
+				log.Error("Unable to GetUserByID %d: %s", relinkedID, err)
+				return err
+			}
+			if err := loginOrFail(h.Store, w, r, user); err != nil {
+				log.Error("Unable to loginOrFail %d: %s", user.ID, err)
+				return err
+			}
+			return nil
+		}
+
+		maxBlogs, eligible, err := app.db.GetOauthPreauth(tokenInfo.UserID, provider, clientID)
+		if err != nil {
+			return err
+		}
+		if !eligible {
+			return nil
+		}
+		jitHandled = true
+
 		// CreateUser enforces uniqueness of this string against THREE tables,
 		// not just users.username: collections.alias (INSERT INTO collections,
 		// database.go ~line 248, rolls back and returns 409 on collision) and
@@ -477,17 +525,17 @@ func (h oauthHandler) viewOauthCallback(app *App, w http.ResponseWriter, r *http
 			HashedPass: []byte{},
 			Created:    time.Now().Truncate(time.Second).UTC(),
 		}
-		if err = h.DB.CreateUser(h.Config, newUser, tokenInfo.DisplayName, ""); err != nil {
+		if err := h.DB.CreateUser(h.Config, newUser, tokenInfo.DisplayName, ""); err != nil {
 			log.Error("oauth JIT: CreateUser failed for %q (remote user %s, provider %s, client %s): %v", username, tokenInfo.UserID, provider, clientID, err)
-			return impart.HTTPError{http.StatusInternalServerError, err.Error()}
+			return err
 		}
-		if err = app.db.SetUserMaxBlogs(newUser.Username, maxBlogs); err != nil {
+		if err := app.db.SetUserMaxBlogs(newUser.Username, maxBlogs); err != nil {
 			log.Error("oauth JIT: created user %q but failed to set max_blogs: %v", newUser.Username, err)
 			// Do not fail the login over this -- the user account exists and is
 			// usable; worst case they fall back to the instance default limit
 			// until the next allowance push or the nightly audit corrects it.
 		}
-		if err = h.DB.RecordRemoteUserID(r.Context(), newUser.ID, tokenInfo.UserID, provider, clientID, tokenResponse.AccessToken); err != nil {
+		if err := h.DB.RecordRemoteUserID(r.Context(), newUser.ID, tokenInfo.UserID, provider, clientID, tokenResponse.AccessToken); err != nil {
 			// CreateUser has already committed users/collections rows at this
 			// point -- this is a partial failure, not a clean rollback. The
 			// account now exists but is unlinked, and normalizeOauthUsername's
@@ -497,16 +545,22 @@ func (h oauthHandler) viewOauthCallback(app *App, w http.ResponseWriter, r *http
 			// account rather than completing this one. Log loudly so this is
 			// discoverable and manually fixable rather than a silent 500.
 			log.Error("oauth JIT: created user id=%d username=%q but FAILED to link remote user %s (provider %s, client %s): %v -- this account is orphaned and needs manual reconciliation", newUser.ID, newUser.Username, tokenInfo.UserID, provider, clientID, err)
-			return impart.HTTPError{http.StatusInternalServerError, err.Error()}
+			return err
 		}
-		if err = app.db.DeleteOauthPreauth(tokenInfo.UserID, provider, clientID); err != nil {
+		if err := app.db.DeleteOauthPreauth(tokenInfo.UserID, provider, clientID); err != nil {
 			log.Error("oauth JIT: provisioned user %q but failed to delete preauth row: %v", newUser.Username, err)
 		}
 
-		if err = loginOrFail(h.Store, w, r, newUser); err != nil {
+		if err := loginOrFail(h.Store, w, r, newUser); err != nil {
 			log.Error("Unable to loginOrFail %d: %s", newUser.ID, err)
-			return impart.HTTPError{http.StatusInternalServerError, err.Error()}
+			return err
 		}
+		return nil
+	})
+	if lockErr != nil {
+		return impart.HTTPError{http.StatusInternalServerError, lockErr.Error()}
+	}
+	if jitHandled {
 		return nil
 	}
 

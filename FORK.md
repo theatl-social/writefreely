@@ -142,3 +142,19 @@ Two signup routes exist (`routes.go`) and they are not equivalent:
 Only the OAuth JIT path (`oauth.go`, `oauth_preauth.go`) enforces its access
 gate in code, unconditionally, via the `oauth_preauth` table. Don't conflate
 any of these when reasoning about what's "closed" on this instance.
+
+**A revoked/deleted account can still be re-provisioned by a later login.**
+`handleSetMastodonUserMaxBlogs` (`oauth_preauth.go`) now supports a
+`max_blogs: 0` "revoke" signal that deletes an unconsumed `oauth_preauth`
+row outright, closing the gap where a cancelled membership that never logged
+in kept a permanently valid grant. That is scoped narrowly to *pending*
+grants, though: it says nothing about an account an admin has already
+deleted at the database level. If the member site pushes a fresh allowance
+for that same Mastodon identity after such a deletion (as its normal nightly
+sync would), `GetIDForRemoteUser` reports "not linked" (the `oauth_users` row
+is gone too), a new `oauth_preauth` row is written, and the member's next
+login re-provisions a brand-new account under the same identity. Deliberately
+not addressed here — narrower fixes (an explicit tombstone/deny-list keyed on
+`remote_user_id`, or having the member site's deletion flow revoke first)
+are possible, but out of scope for this round; noted so it isn't confused for
+an oversight in the revoke fix above.

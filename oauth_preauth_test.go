@@ -4,15 +4,20 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"fmt"
 	stdlog "log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/writeas/impart"
 	wclog "github.com/writeas/web-core/log"
 	"github.com/writefreely/writefreely/config"
 	"github.com/writefreely/writefreely/key"
@@ -124,7 +129,6 @@ func TestHandleSetMastodonUserMaxBlogs(t *testing.T) {
 			`not json`,
 			`{}`,
 			`{"max_blogs":null}`,
-			`{"max_blogs":0}`,
 			`{"max_blogs":-1}`,
 			`{"max_blogs":99999}`,
 			`{"maxblogs":5}`,
@@ -183,7 +187,6 @@ func TestHandleSetMastodonUserMaxBlogs(t *testing.T) {
 			`not json`,
 			`{}`,
 			`{"max_blogs":null}`,
-			`{"max_blogs":0}`,
 			`{"max_blogs":-1}`,
 			`{"max_blogs":99999}`,
 			`{"maxblogs":5}`,
@@ -196,6 +199,343 @@ func TestHandleSetMastodonUserMaxBlogs(t *testing.T) {
 		assert.NoError(t, ds.QueryRow("SELECT max_blogs FROM users WHERE id = ?", uid).Scan(&gotMaxBlogs))
 		assert.True(t, gotMaxBlogs.Valid)
 		assert.Equal(t, int64(15), gotMaxBlogs.Int64, "a refused payload must not modify the allowance")
+	})
+}
+
+// TestHandleSetMastodonUserMaxBlogsRevokePending proves the fix for a design
+// gap an adversarial whole-branch review found: before this fix, a preauth
+// grant had no way to be revoked. It lived forever until either a login
+// consumed it or a later push overwrote it -- a member who cancelled their
+// membership before ever logging into Write Freely kept a permanently valid
+// grant. max_blogs: 0 is now a revoke signal: it deletes any pending,
+// not-yet-consumed preauth row outright, rather than being rejected as
+// invalid (the old behavior) or upserted verbatim (which, if a login ever
+// consumed it, would set users.max_blogs to 0 -- UNLIMITED, per
+// effectiveMaxBlogs/checkBlogLimitN in maxblogs.go -- the opposite of
+// revoked).
+//
+// TestOauthPreauthRevokeThenLoginRefuses (oauth_test.go) carries this same
+// scenario one step further: past the revoke itself, through an actual login
+// attempt, proving it correctly 403s and creates no account.
+func TestHandleSetMastodonUserMaxBlogsRevokePending(t *testing.T) {
+	if !runMySQLTests() {
+		t.Skip("skipping mysql tests")
+	}
+	withTestDB(t, func(db *sql.DB) {
+		ds := &datastore{DB: db, driverName: driverMySQL}
+		assert.NoError(t, ds.ensureOauthPreauthTable())
+
+		app := &App{db: ds, cfg: config.New()}
+		secret := "0123456789abcdef0123456789abcdef"
+		t.Setenv("WRITEFREELY_API_SECRET", secret)
+
+		router := mux.NewRouter()
+		router.HandleFunc("/api/internal/mastodon-user/{remoteUserID}/max-blogs",
+			handleSetMastodonUserMaxBlogs(app)).Methods("POST")
+
+		post := func(remoteID, body string) int {
+			r := httptest.NewRequest("POST",
+				"/api/internal/mastodon-user/"+remoteID+"/max-blogs", strings.NewReader(body))
+			r.Header.Set("X-WriteFreely-Secret", secret)
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, r)
+			return w.Code
+		}
+
+		const remoteUserID = "revoke-pending-1"
+		clientID := app.cfg.GenericOauth.ClientID
+
+		// A membership grant is pushed...
+		assert.Equal(t, http.StatusOK, post(remoteUserID, `{"max_blogs":15}`))
+		_, found, err := ds.GetOauthPreauth(remoteUserID, "generic", clientID)
+		require.NoError(t, err)
+		require.True(t, found, "sanity: the grant must exist before it can be revoked")
+
+		// ...then the membership is cancelled before the member ever logs in.
+		assert.Equal(t, http.StatusOK, post(remoteUserID, `{"max_blogs":0}`),
+			"max_blogs: 0 must now be accepted as a revoke signal, not rejected as an invalid value")
+		_, found, err = ds.GetOauthPreauth(remoteUserID, "generic", clientID)
+		assert.NoError(t, err)
+		assert.False(t, found, "revoke (max_blogs: 0) must delete the unconsumed preauth row")
+
+		// Revoking an identity with no pending row at all must still be a
+		// clean 200, not an error -- mirrors DeleteOauthPreauth's own
+		// no-op-not-an-error contract.
+		assert.Equal(t, http.StatusOK, post("revoke-pending-never-existed", `{"max_blogs":0}`))
+	})
+}
+
+// TestHandleSetMastodonUserMaxBlogsRevokeAlreadyLinked covers the other half
+// of the revoke design decision: what "revoke" means once an identity is
+// already linked to a real account, where there's no preauth row left to
+// delete. It cannot mean storing max_blogs = 0 -- effectiveMaxBlogs and
+// checkBlogLimitN (maxblogs.go) treat any stored value <= 0 as UNLIMITED, so
+// that would grant the opposite of "revoked". oauthRevokedAccountMaxBlogs (1)
+// is used instead: the lowest real tier, which still means "capped".
+//
+// This does not merely check the stored column value -- it drives the actual
+// enforcement path (checkBlogLimitN, the same one newCollection and
+// ClaimPosts use) to prove a "revoked" account is genuinely blocked from
+// creating a second blog, not silently unlimited.
+func TestHandleSetMastodonUserMaxBlogsRevokeAlreadyLinked(t *testing.T) {
+	if !runMySQLTests() {
+		t.Skip("skipping mysql tests")
+	}
+	withTestDB(t, func(db *sql.DB) {
+		ds := &datastore{DB: db, driverName: driverMySQL}
+		assert.NoError(t, ds.ensureMaxBlogsColumn())
+		assert.NoError(t, ds.ensureOauthPreauthTable())
+
+		app := &App{db: ds, cfg: config.New()}
+		secret := "0123456789abcdef0123456789abcdef"
+		t.Setenv("WRITEFREELY_API_SECRET", secret)
+
+		router := mux.NewRouter()
+		router.HandleFunc("/api/internal/mastodon-user/{remoteUserID}/max-blogs",
+			handleSetMastodonUserMaxBlogs(app)).Methods("POST")
+
+		post := func(remoteID, body string) int {
+			r := httptest.NewRequest("POST",
+				"/api/internal/mastodon-user/"+remoteID+"/max-blogs", strings.NewReader(body))
+			r.Header.Set("X-WriteFreely-Secret", secret)
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, r)
+			return w.Code
+		}
+
+		res, err := ds.Exec(
+			"INSERT INTO users (username, password, email, created) VALUES (?, ?, ?, NOW())",
+			"revokelinked", "x", nil)
+		require.NoError(t, err)
+		uid, _ := res.LastInsertId()
+		_, err = ds.ExecContext(context.Background(),
+			"INSERT INTO oauth_users (user_id, remote_user_id, provider, client_id, access_token) VALUES (?, ?, ?, ?, ?)",
+			uid, "revoke-linked-1", "generic", app.cfg.GenericOauth.ClientID, "tok")
+		require.NoError(t, err)
+		require.NoError(t, ds.SetUserMaxBlogs("revokelinked", 15))
+		// Give the account one existing blog, so a limit of 1 (capped) and a
+		// limit of 0 (unlimited) produce OBSERVABLY DIFFERENT behavior below
+		// -- with zero existing blogs, both would let a first blog through,
+		// and the test would prove nothing.
+		_, err = ds.Exec(
+			"INSERT INTO collections (alias, title, description, privacy, owner_id, view_count) VALUES (?, ?, '', 1, ?, 0)",
+			"revokelinked", "revokelinked", uid)
+		require.NoError(t, err)
+
+		assert.Equal(t, http.StatusOK, post("revoke-linked-1", `{"max_blogs":0}`))
+
+		var gotMaxBlogs sql.NullInt64
+		assert.NoError(t, ds.QueryRow("SELECT max_blogs FROM users WHERE id = ?", uid).Scan(&gotMaxBlogs))
+		assert.True(t, gotMaxBlogs.Valid)
+		assert.Equal(t, int64(oauthRevokedAccountMaxBlogs), gotMaxBlogs.Int64,
+			"revoking an already-linked account must cap at the minimum real tier, NOT store 0 -- 0 means UNLIMITED in users.max_blogs")
+
+		limitErr := (&App{db: ds, cfg: app.cfg}).checkBlogLimitN(uid, 1)
+		require.Error(t, limitErr,
+			"capping at oauthRevokedAccountMaxBlogs (1) must actually block a second blog once the member already has one -- "+
+				"if this passed, revoke silently became unlimited (0), the exact bug this fix guards against")
+		httpErr, ok := limitErr.(impart.HTTPError)
+		assert.True(t, ok, "expected impart.HTTPError, got %T", limitErr)
+		assert.Equal(t, http.StatusForbidden, httpErr.Status)
+	})
+}
+
+// TestWithOauthIdentityLockSerializesConcurrentCallers directly exercises the
+// mutual-exclusion mechanism handleSetMastodonUserMaxBlogs and
+// viewOauthCallback's JIT branch (oauth.go) both rely on to close the TOCTOU
+// race an adversarial whole-branch review found and confirmed against a real
+// database: an allowance push and a concurrent login for the SAME identity
+// must never run their check-then-write critical sections at the same time,
+// or a downgrade can be silently lost while a preauth row gets resurrected
+// for an identity that's already provisioned (see withOauthIdentityLock's
+// doc comment for the full mechanics, and
+// TestOauthLoginRaceWithMaxBlogsPushIsLinearizable in oauth_test.go for that
+// end-to-end scenario reproduced through the real login + push code paths).
+//
+// This test targets the lock primitive itself, in isolation, and deliberately
+// widens the race window with a short sleep inside the guarded closure --
+// real scheduling jitter alone might not reliably expose a broken lock on
+// every run, but this makes failure certain if mutual exclusion isn't
+// actually being enforced. Reverting withOauthIdentityLock to an unconditional
+// `return fn()` (i.e. no locking at all) makes this test fail reliably,
+// confirming it actually exercises the fix rather than passing vacuously.
+func TestWithOauthIdentityLockSerializesConcurrentCallers(t *testing.T) {
+	if !runMySQLTests() {
+		t.Skip("skipping mysql tests")
+	}
+	withTestDB(t, func(db *sql.DB) {
+		ds := &datastore{DB: db, driverName: driverMySQL}
+
+		const remoteUserID, provider, clientID = "lock-race-1", "generic", "client-lock-race-1"
+		const goroutines = 8
+
+		var inFlight int32
+		var maxObserved int32
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+
+		for i := 0; i < goroutines; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				err := ds.withOauthIdentityLock(context.Background(), remoteUserID, provider, clientID, func() error {
+					cur := atomic.AddInt32(&inFlight, 1)
+					for {
+						old := atomic.LoadInt32(&maxObserved)
+						if cur <= old || atomic.CompareAndSwapInt32(&maxObserved, old, cur) {
+							break
+						}
+					}
+					time.Sleep(50 * time.Millisecond)
+					atomic.AddInt32(&inFlight, -1)
+					return nil
+				})
+				assert.NoError(t, err)
+			}()
+		}
+		close(start)
+		wg.Wait()
+
+		assert.Equal(t, int32(1), atomic.LoadInt32(&maxObserved),
+			"at most one goroutine may run inside the identity-locked section at a time for the SAME identity -- "+
+				"a value >1 means the fix is not actually serializing concurrent callers")
+	})
+}
+
+// TestHandleSetMastodonUserMaxBlogsWaitsForInFlightLogin is the primary,
+// deterministic proof that the push endpoint and a concurrent JIT login can
+// no longer interleave badly. It does not rely on winning a timing race --
+// real scheduling and network jitter turned out to make the actual bug
+// difficult to force via unsynchronized goroutines in a fast, local test
+// (push's read+write are two back-to-back local DB calls with essentially no
+// gap between them; TestOauthLoginRaceWithMaxBlogsPushIsLinearizable in
+// oauth_test.go exercises that realistic, best-effort version, but a run of
+// it can pass even with the lock disabled, simply because push usually wins
+// outright before login gets anywhere near its own writes -- it is a useful
+// integration sanity check, not sufficient proof by itself).
+//
+// This test instead manually simulates the exact race window from the bug
+// report deterministically: it holds withOauthIdentityLock itself, standing
+// in for "a real login (viewOauthCallback, oauth.go) is currently inside its
+// own identical lock call, mid-flight" -- without needing a real, slow
+// Mastodon network round trip to naturally create that window. While that
+// simulated login holds the lock, it starts the REAL push handler
+// concurrently and asserts push does NOT complete: if it did, that would
+// mean push's GetIDForRemoteUser read slipped in and observed a stale
+// "not linked" state exactly like the bug describes. Only once the
+// simulated login "finishes" (leaving behind the exact end state a real JIT
+// login leaves: an oauth_users link, but -- deliberately -- BEFORE its own
+// preauth cleanup) does the lock release and push proceed, at which point it
+// must see the identity as linked, apply the downgrade to users.max_blogs
+// directly, and clean up the stale preauth row itself.
+//
+// Reverting withOauthIdentityLock to an unconditional `return fn()` makes
+// this test fail immediately and reliably (push completes while the
+// simulated login "holds" a lock that no longer exists), confirming this
+// test actually exercises the fix.
+func TestHandleSetMastodonUserMaxBlogsWaitsForInFlightLogin(t *testing.T) {
+	if !runMySQLTests() {
+		t.Skip("skipping mysql tests")
+	}
+	withTestDB(t, func(db *sql.DB) {
+		ds := &datastore{DB: db, driverName: driverMySQL}
+		assert.NoError(t, ds.ensureMaxBlogsColumn())
+		assert.NoError(t, ds.ensureOauthPreauthTable())
+
+		app := &App{db: ds, cfg: config.New()}
+		secret := "0123456789abcdef0123456789abcdef"
+		t.Setenv("WRITEFREELY_API_SECRET", secret)
+
+		router := mux.NewRouter()
+		router.HandleFunc("/api/internal/mastodon-user/{remoteUserID}/max-blogs",
+			handleSetMastodonUserMaxBlogs(app)).Methods("POST")
+
+		const remoteUserID = "lockwait-1"
+		const provider = "generic"
+		clientID := app.cfg.GenericOauth.ClientID
+		const originalMaxBlogs = 15
+		const downgradedMaxBlogs = 3
+
+		require.NoError(t, ds.UpsertOauthPreauth(remoteUserID, provider, clientID, originalMaxBlogs))
+
+		loginHoldsLock := make(chan struct{})
+		releaseLogin := make(chan struct{})
+		loginDone := make(chan struct{})
+		go func() {
+			defer close(loginDone)
+			err := ds.withOauthIdentityLock(context.Background(), remoteUserID, provider, clientID, func() error {
+				close(loginHoldsLock)
+				<-releaseLogin
+				// Simulate the end state a real JIT login (oauth.go) leaves
+				// behind, up to but NOT including its own preauth cleanup --
+				// this is the exact "resurrection window" the bug exploited:
+				// the identity is linked, but a preauth row still exists.
+				res, err := ds.Exec(
+					"INSERT INTO users (username, password, email, created) VALUES (?, ?, ?, NOW())",
+					"lockwaituser", "x", nil)
+				if err != nil {
+					return err
+				}
+				uid, err := res.LastInsertId()
+				if err != nil {
+					return err
+				}
+				if err := ds.RecordRemoteUserID(context.Background(), uid, remoteUserID, provider, clientID, "tok"); err != nil {
+					return err
+				}
+				return ds.SetUserMaxBlogs("lockwaituser", originalMaxBlogs)
+			})
+			assert.NoError(t, err)
+		}()
+		<-loginHoldsLock
+
+		pushDone := make(chan int, 1)
+		go func() {
+			r := httptest.NewRequest("POST", "/api/internal/mastodon-user/"+remoteUserID+"/max-blogs",
+				strings.NewReader(fmt.Sprintf(`{"max_blogs":%d}`, downgradedMaxBlogs)))
+			r.Header.Set("X-WriteFreely-Secret", secret)
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, r)
+			pushDone <- w.Code
+		}()
+
+		select {
+		case <-pushDone:
+			t.Fatal("push must not complete while the simulated in-flight login still holds the per-identity lock -- " +
+				"completing here means push's GetIDForRemoteUser read could observe a stale 'not linked' state, " +
+				"exactly the TOCTOU race this fix closes")
+		case <-time.After(200 * time.Millisecond):
+			// Expected: push is still blocked waiting on the lock.
+		}
+
+		close(releaseLogin)
+		<-loginDone
+
+		var pushStatus int
+		select {
+		case pushStatus = <-pushDone:
+		case <-time.After(5 * time.Second):
+			t.Fatal("push never completed after the simulated login released the lock")
+		}
+		assert.Equal(t, http.StatusOK, pushStatus)
+
+		localUserID, err := ds.GetIDForRemoteUser(context.Background(), remoteUserID, provider, clientID)
+		require.NoError(t, err)
+		require.NotEqual(t, int64(-1), localUserID, "the simulated login must have linked the identity")
+
+		var gotMaxBlogs sql.NullInt64
+		require.NoError(t, ds.QueryRow("SELECT max_blogs FROM users WHERE id = ?", localUserID).Scan(&gotMaxBlogs))
+		assert.True(t, gotMaxBlogs.Valid)
+		assert.Equal(t, int64(downgradedMaxBlogs), gotMaxBlogs.Int64,
+			"the downgrade must actually apply once push correctly observes the identity as linked -- "+
+				"seeing the OLD value here means push read a stale unlinked state and the downgrade was lost")
+
+		_, found, err := ds.GetOauthPreauth(remoteUserID, provider, clientID)
+		require.NoError(t, err)
+		assert.False(t, found,
+			"no preauth row may survive once the identity is linked -- a surviving row here is exactly the "+
+				"'resurrected grant' bug: push believing the identity unlinked and upserting a grant nobody will ever consume")
 	})
 }
 

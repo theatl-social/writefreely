@@ -18,6 +18,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gorilla/mux"
@@ -634,6 +635,285 @@ func TestViewOauthCallbackJITProvisioning(t *testing.T) {
 			require.NoError(t, ds.QueryRow("SELECT COUNT(*) FROM users WHERE username = ?", "user").Scan(&n))
 			assert.Equal(t, 0, n, "no user row may ever be named exactly \"user\" as a result of this provisioning")
 		})
+	})
+}
+
+// oauthTestMockRoundTrip stands in for the real Mastodon /oauth/token and
+// /oauth/inspect endpoints, shared by the revoke and race tests below --
+// same approach as TestViewOauthCallbackJITProvisioning's local closure of
+// the same name, factored out because both tests below need it too.
+func oauthTestMockRoundTrip(remoteUserID, username string) *MockHTTPClient {
+	return &MockHTTPClient{
+		DoDo: func(req *http.Request) (*http.Response, error) {
+			switch req.URL.String() {
+			case "https://write.as/oauth/token":
+				return &http.Response{
+					StatusCode: 200,
+					Body: &StringReadCloser{strings.NewReader(
+						`{"access_token": "access-token", "expires_in": 1000, "refresh_token": "refresh-token", "token_type": "access"}`)},
+				}, nil
+			case "https://write.as/oauth/inspect":
+				return &http.Response{
+					StatusCode: 200,
+					Body: &StringReadCloser{strings.NewReader(fmt.Sprintf(
+						`{"client_id": "generic", "user_id": %q, "expires_at": "2030-01-01T00:00:00Z", "username": %q, "email": "x@example.com"}`,
+						remoteUserID, username))},
+				}, nil
+			}
+			return &http.Response{StatusCode: http.StatusNotFound}, nil
+		},
+	}
+}
+
+// TestOauthPreauthRevokeThenLoginRefuses carries
+// TestHandleSetMastodonUserMaxBlogsRevokePending (oauth_preauth_test.go) one
+// step further: past the revoke call itself, through an actual OAuth login
+// attempt for the now-revoked identity. Before the fix, an unconsumed
+// preauth grant had no way to be revoked at all -- it lived forever until a
+// login consumed it or a later push overwrote it, so a member who cancelled
+// their membership before ever logging in kept a permanently valid grant.
+// This proves the fix closes that gap end-to-end: revoke, then attempt to
+// actually use the (now-nonexistent) grant, and confirm it's refused exactly
+// like an identity that was never preauthorized at all -- 403, no account,
+// no oauth_users link.
+func TestOauthPreauthRevokeThenLoginRefuses(t *testing.T) {
+	if !runMySQLTests() {
+		t.Skip("skipping mysql tests")
+	}
+	withTestDB(t, func(db *sql.DB) {
+		ds := &datastore{DB: db, driverName: driverMySQL}
+		assert.NoError(t, ds.ensureMaxBlogsColumn())
+		assert.NoError(t, ds.ensureOauthPreauthTable())
+
+		cfg := config.New()
+		cfg.GenericOauth.ClientID = "client-revoke-1"
+		store := sessions.NewCookieStore([]byte("secret-key"))
+		app := &App{db: ds, cfg: cfg, sessionStore: store}
+
+		router := mux.NewRouter()
+		router.HandleFunc("/api/internal/mastodon-user/{remoteUserID}/max-blogs",
+			handleSetMastodonUserMaxBlogs(app)).Methods("POST")
+		secret := "0123456789abcdef0123456789abcdef"
+		t.Setenv("WRITEFREELY_API_SECRET", secret)
+
+		push := func(remoteID, body string) int {
+			r := httptest.NewRequest("POST", "/api/internal/mastodon-user/"+remoteID+"/max-blogs",
+				strings.NewReader(body))
+			r.Header.Set("X-WriteFreely-Secret", secret)
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, r)
+			return w.Code
+		}
+
+		const remoteUserID = "revoke-11111"
+		const provider = "generic"
+		clientID := cfg.GenericOauth.ClientID
+
+		// A membership grant is pushed...
+		require.Equal(t, http.StatusOK, push(remoteUserID, `{"max_blogs":15}`))
+		_, found, err := ds.GetOauthPreauth(remoteUserID, provider, clientID)
+		require.NoError(t, err)
+		require.True(t, found, "sanity: the grant must exist before it can be revoked")
+
+		// ...then the membership is cancelled before the member ever logs in.
+		require.Equal(t, http.StatusOK, push(remoteUserID, `{"max_blogs":0}`))
+		_, found, err = ds.GetOauthPreauth(remoteUserID, provider, clientID)
+		require.NoError(t, err)
+		require.False(t, found, "sanity: revoke must delete the unconsumed preauth row")
+
+		// A subsequent login attempt for this identity must find no grant and
+		// refuse cleanly -- not fall through to any signup path, and not
+		// create an account.
+		state, err := ds.GenerateOAuthState(context.Background(), provider, clientID, 0, "")
+		require.NoError(t, err)
+
+		h := oauthHandler{
+			Config: cfg,
+			DB:     ds,
+			Store:  store,
+			oauthClient: writeAsOauthClient{
+				ClientID:         clientID,
+				ClientSecret:     "development",
+				ExchangeLocation: "https://write.as/oauth/token",
+				InspectLocation:  "https://write.as/oauth/inspect",
+				AuthLocation:     "https://write.as/oauth/login",
+				CallbackLocation: "http://localhost/oauth/callback",
+				HttpClient:       oauthTestMockRoundTrip(remoteUserID, "revokeduser"),
+			},
+		}
+		q := url.Values{"code": {"test-code"}, "state": {state}}
+		req, err := http.NewRequest("GET", "/oauth/callback/generic?"+q.Encode(), nil)
+		require.NoError(t, err)
+		rr := httptest.NewRecorder()
+
+		err = h.viewOauthCallback(app, rr, req)
+		require.Error(t, err)
+		httpErr, ok := err.(impart.HTTPError)
+		require.True(t, ok, "expected impart.HTTPError, got %T", err)
+		assert.Equal(t, http.StatusForbidden, httpErr.Status)
+
+		localUserID, err := ds.GetIDForRemoteUser(context.Background(), remoteUserID, provider, clientID)
+		require.NoError(t, err)
+		assert.Equal(t, int64(-1), localUserID, "no account may be created for a revoked identity")
+
+		var n int
+		require.NoError(t, ds.QueryRow("SELECT COUNT(*) FROM users WHERE username = ?", "revokeduser").Scan(&n))
+		assert.Equal(t, 0, n)
+	})
+}
+
+// TestOauthLoginRaceWithMaxBlogsPushIsLinearizable is a best-effort,
+// real-timing integration companion to
+// TestHandleSetMastodonUserMaxBlogsWaitsForInFlightLogin (oauth_preauth_test.go)
+// -- that other test is the primary, deterministic proof of the fix (it does
+// not depend on winning any timing race, and reliably fails if the lock is
+// removed). This one runs the two real code paths concurrently, unsynchronized
+// by the test itself, and checks the same invariants; it is valuable as an
+// integration sanity check under real goroutine/DB-driver scheduling, but on
+// its own it is NOT sufficient proof -- in local testing, push's read and
+// write are two back-to-back local DB calls with almost no gap between them,
+// so push usually completes entirely before login gets anywhere near its own
+// writes, and this test was observed to pass even with the lock removed
+// simply because that particular interleaving never got exercised. Real
+// production traffic has login doing a genuinely slow, real HTTPS round trip
+// to Mastodon between its own read and write (not mocked-instant like here),
+// which is what actually opens the window this whole fix is about.
+//
+// This test reproduces, end-to-end, the TOCTOU race an adversarial
+// whole-branch review found and confirmed against a real database:
+// handleSetMastodonUserMaxBlogs (oauth_preauth.go) used to read
+// GetIDForRemoteUser and then branch on that read with no synchronization
+// against viewOauthCallback's JIT branch (oauth.go) doing the equivalent
+// check for the SAME identity. Interleaved, a downgrade push could read "not
+// linked" while a concurrent login was mid-flight: the login would consume
+// the OLD preauth value and link the account, then the push -- still
+// believing the identity unlinked -- would upsert a NEW preauth row carrying
+// the downgraded value. Net effect: the push returned 200 OK, but the
+// account kept its OLD allowance, AND a preauth row was resurrected for an
+// identity that was already provisioned (one no future login would ever
+// consume, since JIT only calls GetOauthPreauth once GetIDForRemoteUser
+// first comes back unlinked).
+//
+// The fix (withOauthIdentityLock, oauth_preauth.go) makes the two
+// operations mutually exclusive per identity, but does not dictate which one
+// wins a given race -- and it doesn't need to. Whichever wins, the combined
+// outcome must be equivalent to SOME sequential ordering of the two ("push
+// then login" or "login then push"), and both of those orderings converge on
+// the exact same two invariants asserted below:
+//   - push then login: push upserts a preauth row carrying the new value;
+//     login then consumes THAT row, so the account is created with the new
+//     value and the row is deleted.
+//   - login then push: login consumes the OLD preauth value and links the
+//     account; push then finds the identity linked and updates
+//     users.max_blogs to the new value directly.
+//
+// Either way, the account ends up linked, holding the PUSHED value, with no
+// preauth row left over. A run that violates either invariant is exactly the
+// lost-downgrade/resurrected-grant bug this test exists to catch. This runs
+// many trials with a start barrier releasing both goroutines together, so
+// real scheduling and network-round-trip jitter (against a real MariaDB) has
+// real opportunity to produce both orderings across the run, not just one.
+func TestOauthLoginRaceWithMaxBlogsPushIsLinearizable(t *testing.T) {
+	if !runMySQLTests() {
+		t.Skip("skipping mysql tests")
+	}
+	withTestDB(t, func(db *sql.DB) {
+		ds := &datastore{DB: db, driverName: driverMySQL}
+		assert.NoError(t, ds.ensureMaxBlogsColumn())
+		assert.NoError(t, ds.ensureOauthPreauthTable())
+
+		cfg := config.New()
+		cfg.GenericOauth.ClientID = "client-race-1"
+		store := sessions.NewCookieStore([]byte("secret-key"))
+		app := &App{db: ds, cfg: cfg, sessionStore: store}
+		clientID := cfg.GenericOauth.ClientID
+
+		router := mux.NewRouter()
+		router.HandleFunc("/api/internal/mastodon-user/{remoteUserID}/max-blogs",
+			handleSetMastodonUserMaxBlogs(app)).Methods("POST")
+		secret := "0123456789abcdef0123456789abcdef"
+		t.Setenv("WRITEFREELY_API_SECRET", secret)
+
+		push := func(remoteID string, maxBlogs int) int {
+			r := httptest.NewRequest("POST", "/api/internal/mastodon-user/"+remoteID+"/max-blogs",
+				strings.NewReader(fmt.Sprintf(`{"max_blogs":%d}`, maxBlogs)))
+			r.Header.Set("X-WriteFreely-Secret", secret)
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, r)
+			return w.Code
+		}
+
+		const trials = 15
+		const initialMaxBlogs = 15
+		const pushedMaxBlogs = 3
+
+		for trial := 0; trial < trials; trial++ {
+			remoteUserID := fmt.Sprintf("race-%d", trial)
+			username := fmt.Sprintf("racer%d", trial)
+
+			require.NoError(t, ds.UpsertOauthPreauth(remoteUserID, "generic", clientID, initialMaxBlogs))
+
+			state, err := ds.GenerateOAuthState(context.Background(), "generic", clientID, 0, "")
+			require.NoError(t, err)
+
+			h := oauthHandler{
+				Config: cfg,
+				DB:     ds,
+				Store:  store,
+				oauthClient: writeAsOauthClient{
+					ClientID:         clientID,
+					ClientSecret:     "development",
+					ExchangeLocation: "https://write.as/oauth/token",
+					InspectLocation:  "https://write.as/oauth/inspect",
+					AuthLocation:     "https://write.as/oauth/login",
+					CallbackLocation: "http://localhost/oauth/callback",
+					HttpClient:       oauthTestMockRoundTrip(remoteUserID, username),
+				},
+			}
+			q := url.Values{"code": {"test-code"}, "state": {state}}
+			req, err := http.NewRequest("GET", "/oauth/callback/generic?"+q.Encode(), nil)
+			require.NoError(t, err)
+			rr := httptest.NewRecorder()
+
+			var wg sync.WaitGroup
+			start := make(chan struct{})
+			var loginErr error
+			var pushStatus int
+
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				<-start
+				loginErr = h.viewOauthCallback(app, rr, req)
+			}()
+			go func() {
+				defer wg.Done()
+				<-start
+				pushStatus = push(remoteUserID, pushedMaxBlogs)
+			}()
+			close(start)
+			wg.Wait()
+
+			require.NoError(t, loginErr, "trial %d: login must always succeed regardless of race outcome", trial)
+			require.Equal(t, http.StatusOK, pushStatus, "trial %d: push must always report success", trial)
+
+			localUserID, err := ds.GetIDForRemoteUser(context.Background(), remoteUserID, "generic", clientID)
+			require.NoError(t, err)
+			require.NotEqual(t, int64(-1), localUserID, "trial %d: identity must end up linked to an account", trial)
+
+			var gotMaxBlogs sql.NullInt64
+			require.NoError(t, ds.QueryRow("SELECT max_blogs FROM users WHERE id = ?", localUserID).Scan(&gotMaxBlogs))
+			assert.True(t, gotMaxBlogs.Valid, "trial %d", trial)
+			assert.Equal(t, int64(pushedMaxBlogs), gotMaxBlogs.Int64,
+				"trial %d: the push's value must never be silently lost, regardless of which operation the race let win -- "+
+					"a stale value here is exactly the 'lost downgrade' bug", trial)
+
+			_, found, err := ds.GetOauthPreauth(remoteUserID, "generic", clientID)
+			require.NoError(t, err)
+			assert.False(t, found,
+				"trial %d: no preauth row may survive once the identity is linked -- a surviving row here is exactly "+
+					"the 'resurrected grant' bug", trial)
+		}
 	})
 }
 

@@ -26,10 +26,23 @@ single_user       = false
 # becomes 0, which means UNLIMITED. Do not delete keys from this file.
 theme             = write
 webfonts          = true
-# open_registration MUST stay true: it is what registers POST /api/auth/signup,
-# which the member site uses to provision accounts. Public signup is blocked at
-# haproxy, NOT by this flag. See FORK.md before changing it.
-open_registration = true
+# open_registration MUST stay false. It used to gate the member site's
+# provisioning route, but the member site no longer provisions accounts via
+# POST /api/auth/signup -- OAuth JIT provisioning (oauth.go, oauth_preauth.go)
+# is the actual provisioning mechanism now, and it does not consult this flag
+# at all (see viewOauthCallback). Leaving this true does nothing useful and
+# one real thing that's actively bad: routes.go only *mounts*
+# POST /api/auth/signup when this is true, and that handler (account.go's
+# signup) takes a username/password directly with no invite code, no
+# membership check, and no OTHER gate of its own -- so true means a live,
+# ungated, password-based self-serve signup API sitting on the internet,
+# undermining the fork's entire "the only door in is OAuth JIT" model. false
+# unmounts that route entirely. It does NOT fully close POST /auth/signup
+# (that route is registered unconditionally regardless of this flag, and its
+# own open_registration check is bypassed by any non-empty invite_code) --
+# that one is a documented, accepted known limitation gated only by an
+# external HAProxy ACL. See FORK.md's "Known limits" before changing either.
+open_registration = false
 open_deletion     = false
 min_username_len  = 3
 # Fallback only. Real per-user limits live in users.max_blogs and are set by
@@ -41,3 +54,22 @@ private           = false
 user_invites      =
 disable_password_auth = false
 update_checks     = false
+
+[oauth.generic]
+# client_id, client_secret, host, and the endpoint/mapping keys are supplied
+# at deploy time in the real (gitignored) config.ini, alongside the other
+# secrets -- see the top of this file.
+#
+# allow_disconnect MUST stay false. Every account on this instance is
+# provisioned via OAuth JIT (oauth.go, oauth_preauth.go), which means every
+# account is guaranteed passwordless and emailless (see FORK.md). If a member
+# disconnects their Mastodon link, there is no password login and no email
+# for password reset -- the account becomes permanently unreachable, and the
+# next allowance push plus a subsequent login then creates a SECOND,
+# differently-suffixed account for the same identity (nothing at the DB level
+# prevents that duplicate: oauth_users' unique key is
+# (user_id, provider, client_id), not (remote_user_id, provider, client_id)).
+# account.go's removeOauth handler enforces this directly now, but keep this
+# false regardless -- it also controls whether the disconnect button even
+# renders in templates/user/settings.tmpl.
+allow_disconnect = false
