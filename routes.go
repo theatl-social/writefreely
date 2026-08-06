@@ -172,10 +172,11 @@ func InitRoutes(apper Apper, r *mux.Router) *mux.Router {
 	posts.HandleFunc("/{post:[a-zA-Z0-9]+}", handler.All(deletePost)).Methods("DELETE")
 	posts.HandleFunc("/{post:[a-zA-Z0-9]+}/{property}", handler.AllReader(fetchPostProperty)).Methods("GET")
 
-	// theATL fork: internal endpoint for the member site to set a user's blog
-	// allowance. Denied at the reverse proxy; also requires a shared secret.
-	// See FORK.md.
-	write.HandleFunc("/api/internal/user/{username}/max-blogs", handleSetMaxBlogs(apper.App())).Methods("POST")
+	// theATL fork: replaces the username-keyed setter. Handles both the
+	// pre-account (oauth_preauth) and post-account (users.max_blogs) cases
+	// transparently — the member site never branches on provisioning state.
+	// Denied at the reverse proxy; also requires a shared secret. See FORK.md.
+	write.HandleFunc("/api/internal/mastodon-user/{remoteUserID}/max-blogs", handleSetMastodonUserMaxBlogs(apper.App())).Methods("POST")
 
 	write.HandleFunc("/auth/signup", handler.Web(handleWebSignup, UserLevelNoneRequired)).Methods("POST")
 	write.HandleFunc("/auth/login", handler.Web(webLogin, UserLevelNoneRequired)).Methods("POST")

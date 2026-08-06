@@ -3,15 +3,11 @@ package writefreely
 import (
 	"database/sql"
 	"net/http"
-	"net/http/httptest"
-	"strings"
 	"testing"
 
-	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
 	"github.com/writeas/impart"
 	"github.com/writefreely/writefreely/config"
-	"github.com/writefreely/writefreely/key"
 )
 
 func TestEnsureMaxBlogsColumn(t *testing.T) {
@@ -287,150 +283,4 @@ func TestSetUserMaxBlogs(t *testing.T) {
 
 		assert.Equal(t, ErrUserNotFound, ds.SetUserMaxBlogs("nobody", 3))
 	})
-}
-
-func TestHandleSetMaxBlogsAuth(t *testing.T) {
-	if !runMySQLTests() {
-		t.Skip("skipping mysql tests")
-	}
-	withTestDB(t, func(db *sql.DB) {
-		ds := &datastore{DB: db, driverName: driverMySQL}
-		assert.NoError(t, ds.ensureMaxBlogsColumn())
-		_, err := ds.Exec(
-			"INSERT INTO users (username, password, email, created) VALUES (?, ?, ?, NOW())",
-			"authuser", "x", nil)
-		assert.NoError(t, err)
-
-		app := &App{db: ds, cfg: config.New()}
-		secret := "0123456789abcdef0123456789abcdef"
-		t.Setenv("WRITEFREELY_API_SECRET", secret)
-
-		router := mux.NewRouter()
-		router.HandleFunc("/api/internal/user/{username}/max-blogs",
-			handleSetMaxBlogs(app)).Methods("POST")
-
-		post := func(user, sec string, body string) int {
-			r := httptest.NewRequest("POST",
-				"/api/internal/user/"+user+"/max-blogs", strings.NewReader(body))
-			if sec != "" {
-				r.Header.Set("X-WriteFreely-Secret", sec)
-			}
-			w := httptest.NewRecorder()
-			router.ServeHTTP(w, r)
-			return w.Code
-		}
-
-		assert.Equal(t, http.StatusUnauthorized, post("authuser", "", `{"max_blogs":3}`),
-			"missing secret must be rejected")
-		assert.Equal(t, http.StatusUnauthorized, post("authuser", "wrong-but-32-chars-long-xxxxxxxx", `{"max_blogs":3}`),
-			"wrong secret must be rejected")
-		assert.Equal(t, http.StatusOK, post("authuser", secret, `{"max_blogs":3}`))
-		assert.Equal(t, http.StatusNotFound, post("nobody", secret, `{"max_blogs":3}`))
-		assert.Equal(t, http.StatusBadRequest, post("authuser", secret, `not json`))
-		assert.Equal(t, http.StatusBadRequest, post("authuser", secret, `{"max_blogs":-1}`))
-
-		// An absent, null, zero or misspelled max_blogs must be a 400, never a
-		// silent success. 0 means UNLIMITED to effectiveMaxBlogs, so accepting
-		// any of these would remove the member's cap and return 200.
-		for _, bad := range []string{`{}`, `{"max_blogs":null}`, `{"max_blogs":0}`, `{"maxblogs":5}`, `{"max_blogs":99999}`} {
-			assert.Equal(t, http.StatusBadRequest, post("authuser", secret, bad),
-				"payload %s must be refused", bad)
-		}
-
-		// ...and none of them may have changed the stored value.
-		var after sql.NullInt64
-		assert.NoError(t, ds.QueryRow("SELECT max_blogs FROM users WHERE username = ?", "authuser").Scan(&after))
-		assert.True(t, after.Valid)
-		assert.Equal(t, int64(3), after.Int64, "a refused payload must not modify the allowance")
-
-		var got sql.NullInt64
-		assert.NoError(t, ds.QueryRow("SELECT max_blogs FROM users WHERE username = ?", "authuser").Scan(&got))
-		assert.Equal(t, int64(3), got.Int64)
-	})
-}
-
-func TestHandleSetMaxBlogsRefusesWeakSecret(t *testing.T) {
-	app := &App{cfg: config.New()}
-	t.Setenv("WRITEFREELY_API_SECRET", "tooshort")
-
-	router := mux.NewRouter()
-	router.HandleFunc("/api/internal/user/{username}/max-blogs",
-		handleSetMaxBlogs(app)).Methods("POST")
-
-	r := httptest.NewRequest("POST", "/api/internal/user/x/max-blogs",
-		strings.NewReader(`{"max_blogs":3}`))
-	r.Header.Set("X-WriteFreely-Secret", "tooshort")
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, r)
-
-	assert.Equal(t, http.StatusServiceUnavailable, w.Code,
-		"a short secret must fail closed, never authorise")
-}
-
-func TestHandleSetMaxBlogsRefusesUnsetSecret(t *testing.T) {
-	app := &App{cfg: config.New()}
-	// Genuinely unset, not merely short — this is the state a misconfigured
-	// deploy is actually in, and it must not be treated as permission.
-	t.Setenv("WRITEFREELY_API_SECRET", "")
-
-	router := mux.NewRouter()
-	router.HandleFunc("/api/internal/user/{username}/max-blogs",
-		handleSetMaxBlogs(app)).Methods("POST")
-
-	r := httptest.NewRequest("POST", "/api/internal/user/x/max-blogs",
-		strings.NewReader(`{"max_blogs":3}`))
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, r)
-
-	assert.Equal(t, http.StatusServiceUnavailable, w.Code,
-		"an unset secret must fail closed")
-}
-
-// TestMaxBlogsRouteIsRegistered guards against the one failure mode none of
-// the tests above can catch: every test up to this point builds its own
-// throwaway mux.Router and registers handleSetMaxBlogs by hand, so all of them
-// would keep passing even if the real registration —
-// write.HandleFunc("/api/internal/user/{username}/max-blogs", ...) in
-// routes.go's InitRoutes — were deleted entirely. That is exactly the kind of
-// line a conflicted upstream merge can silently drop. This test builds the
-// actual production router via InitRoutes and confirms the route resolves
-// against it.
-func TestMaxBlogsRouteIsRegistered(t *testing.T) {
-	// Must be config.New(), not &config.Config{}: InitRoutes does
-	// cfg.App.Host[strings.Index(cfg.App.Host, "://")+3:] unconditionally, which
-	// panics (slice bounds out of range) on an empty Host. config.New() sets
-	// Host to "http://localhost:8080".
-	cfg := config.New()
-	// config.New() defaults to SingleUser: true, which routes nodeInfoConfig
-	// through db.GetCollectionByID(1) — a real query this test's nil db can't
-	// serve. The fork's actual deployment runs multi-user (config.ini.example
-	// sets single_user = false), so this also matches production's routing
-	// shape, not just avoiding a crash.
-	cfg.App.SingleUser = false
-
-	if err := InitTemplates(cfg); err != nil {
-		t.Fatalf("InitTemplates: %v (expected to find templates/ and pages/ "+
-			"relative to the test binary's working directory)", err)
-	}
-
-	app := &App{
-		cfg: cfg,
-		// A couple of routes InitRoutes registers are wrapped in
-		// csrf.Protect(app.keys.CSRFKey); a nil *key.Keychain panics on that field
-		// access before InitRoutes ever gets to the route this test checks.
-		keys: &key.Keychain{CSRFKey: []byte("0123456789abcdef0123456789abcdef")},
-	}
-
-	router := mux.NewRouter()
-	InitRoutes(app, router)
-
-	req := httptest.NewRequest("POST", "/api/internal/user/someuser/max-blogs", nil)
-	var match mux.RouteMatch
-	if !router.Match(req, &match) {
-		t.Fatalf("POST /api/internal/user/{username}/max-blogs did not resolve "+
-			"against the real router (match error: %v) — the registration in "+
-			"routes.go's InitRoutes appears to be missing", match.MatchErr)
-	}
-	assert.Equal(t, "someuser", match.Vars["username"],
-		"the {username} path variable should capture the username segment")
 }
