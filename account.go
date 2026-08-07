@@ -1540,22 +1540,27 @@ func handleUserDelete(app *App, u *User, w http.ResponseWriter, r *http.Request)
 }
 
 func removeOauth(app *App, u *User, w http.ResponseWriter, r *http.Request) error {
-	// Normalize once, up front, and use this value for BOTH the gate check
-	// below and the unlink call -- not the raw form value for one and a
-	// re-derived value for the other. This matters because oauth_users.provider
-	// is a MariaDB column using a case-insensitive (and accent-/pad-insensitive)
-	// collation (utf8mb4_uca1400_ai_ci, confirmed via SHOW FULL COLUMNS): the
-	// DELETE below would match "generic", "Generic", "GENERIC", or "generic "
-	// all the same, regardless of what Go-level string comparison guards it.
-	// A prior version of this fix compared the raw, un-normalized form value
-	// with Go's case-sensitive ==, so provider=Generic silently skipped the
-	// 403 while the DELETE still matched and removed the link -- a complete
-	// bypass of the AllowDisconnect gate below. strings.ToLower plus TrimSpace
-	// mirrors the collation's case- and pad-insensitivity so the Go-level
-	// check can't disagree with what the database actually does.
-	provider := strings.ToLower(strings.TrimSpace(r.FormValue("provider")))
+	provider := r.FormValue("provider")
 	clientID := r.FormValue("client_id")
 	remoteUserID := r.FormValue("remote_user_id")
+
+	// theATL fork: reject any provider value that isn't an EXACT match for one
+	// of this codebase's canonical OAuth provider identifiers, before the
+	// AllowDisconnect gate below and before any database call. This replaces
+	// two earlier attempts that tried to close a bypass by normalizing the
+	// form value harder (first case-folding, then also trimming) so it would
+	// agree with oauth_users.provider's case-/pad-/accent-insensitive MariaDB
+	// collation (utf8mb4_uca1400_ai_ci) -- both were incomplete, since no
+	// normalization pipeline can fully mirror an arbitrary collation, and an
+	// adversarial review proved it by getting provider=generíc, genërìc, and
+	// full-width ｇｅｎｅｒｉｃ past the normalized Go-level check while the
+	// collation still matched them to the "generic" row for the DELETE. See
+	// isKnownOauthProvider (oauth_preauth.go) for why an allowlist doesn't
+	// have that failure mode: it never has to predict what the database
+	// considers equal to "generic", it only accepts the literal string.
+	if !isKnownOauthProvider(provider) {
+		return impart.HTTPError{Status: http.StatusBadRequest, Message: "Unrecognized OAuth provider."}
+	}
 
 	// theATL fork: reject disconnecting a "generic" (Mastodon) OAuth link
 	// unless it's explicitly allowed by config. Upstream's only gate on this
@@ -1574,7 +1579,11 @@ func removeOauth(app *App, u *User, w http.ResponseWriter, r *http.Request) erro
 	// prevents that duplicate either. config.ini.example ships
 	// allow_disconnect = false for exactly this reason; only the "generic"
 	// provider is gated here because it's the only one the settings template
-	// gates (see viewSettings above, and FORK.md).
+	// gates (see viewSettings above, and FORK.md). Comparing with Go's
+	// case-sensitive == is safe here specifically because the allowlist check
+	// above already guarantees provider is byte-for-byte one of the five
+	// canonical strings -- there is no longer a normalization step whose
+	// completeness this comparison depends on.
 	if provider == "generic" && !app.Config().GenericOauth.AllowDisconnect {
 		return impart.HTTPError{Status: http.StatusForbidden, Message: "Disconnecting this account is not allowed on this instance."}
 	}

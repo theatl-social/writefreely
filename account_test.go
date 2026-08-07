@@ -87,63 +87,93 @@ func TestRemoveOauthRejectsGenericDisconnectWhenDisallowed(t *testing.T) {
 	})
 }
 
-// TestRemoveOauthRejectsGenericDisconnectCaseInsensitively proves the fix for
-// a second-order bypass an adversarial re-review found in the fix above: the
-// AllowDisconnect gate compared the raw provider form value with Go's
-// case-sensitive ==, but oauth_users.provider is a MariaDB column using a
-// case-insensitive (and accent-/pad-insensitive) collation
-// (utf8mb4_uca1400_ai_ci, confirmed via SHOW FULL COLUMNS). So a request with
-// provider=Generic (mixed case) failed the Go-level "== generic" check --
-// silently skipping the 403 -- while the DELETE still matched and removed the
-// link, because the database doesn't care about case. This reproduces that
-// exact bypass attempt (mixed-case "Generic" instead of "generic") and
-// confirms the link survives and a 403 is returned, unlike the earlier,
-// exact-lowercase-only test above.
-func TestRemoveOauthRejectsGenericDisconnectCaseInsensitively(t *testing.T) {
+// TestRemoveOauthRejectsNonCanonicalProviderStrings is the third round on
+// this bug. The first fix had no server-side AllowDisconnect check at all.
+// The second added one, but compared the raw form value with Go's
+// case-sensitive ==, so provider=Generic (mixed case) slipped past the check
+// while oauth_users.provider's MariaDB collation (utf8mb4_uca1400_ai_ci,
+// case-/pad-insensitive) still matched it for the DELETE. The third fix
+// (strings.ToLower + TrimSpace) closed that specific gap but was itself
+// incomplete: the collation is ALSO accent- and full-width-insensitive, and
+// an adversarial review demonstrated three live bypasses the normalized
+// comparison still missed -- provider=generíc, genërìc, and full-width
+// ｇｅｎｅｒｉｃ all failed the normalized "== generic" check yet still matched
+// the collation, so the link was deleted anyway.
+//
+// This exercises all five bypass strings the last three rounds either missed
+// or (for the first two, mixed-case/padded) previously fixed via the
+// AllowDisconnect gate rather than up front. Under the current fix
+// (isKnownOauthProvider, oauth_preauth.go) every one of them is now an exact
+// mismatch against the canonical provider allowlist, so all five are rejected
+// with 400 Bad Request BEFORE the AllowDisconnect gate or the RemoveOauth
+// database call ever run -- proven here by AllowDisconnect being left at its
+// zero value (false) but the rejection still coming back 400, not 403, and by
+// the link surviving in the database.
+func TestRemoveOauthRejectsNonCanonicalProviderStrings(t *testing.T) {
 	if !runMySQLTests() {
 		t.Skip("skipping mysql tests")
 	}
-	withTestDB(t, func(db *sql.DB) {
-		ds := &datastore{DB: db, driverName: driverMySQL}
 
-		cfg := config.New()
-		cfg.GenericOauth.ClientID = "client-disconnect-3"
-		cfg.GenericOauth.AllowDisconnect = false
-		app := &App{db: ds, cfg: cfg}
+	cases := []struct {
+		name     string
+		provider string
+	}{
+		{"mixed_case", "Generic"},
+		{"padded", " generic "},
+		{"accent_i_acute", "generíc"},
+		{"accent_e_diaeresis_i_grave", "genërìc"},
+		{"fullwidth", "ｇｅｎｅｒｉｃ"},
+	}
 
-		res, err := ds.Exec(
-			"INSERT INTO users (username, password, email, created) VALUES (?, ?, ?, NOW())",
-			"disconnectme3", "x", nil)
-		require.NoError(t, err)
-		uid, err := res.LastInsertId()
-		require.NoError(t, err)
-		require.NoError(t, ds.RecordRemoteUserID(context.Background(), uid, "remote-disconnect-3", "generic", cfg.GenericOauth.ClientID, "tok"))
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withTestDB(t, func(db *sql.DB) {
+				ds := &datastore{DB: db, driverName: driverMySQL}
 
-		form := url.Values{
-			// Mixed case, and padded with whitespace -- exactly the kind of
-			// value the case-sensitive == check let slip through, while
-			// MariaDB's case-/pad-insensitive collation still matched it
-			// against the "generic" row for the DELETE.
-			"provider":       {" Generic "},
-			"client_id":      {cfg.GenericOauth.ClientID},
-			"remote_user_id": {"remote-disconnect-3"},
-		}
-		r := httptest.NewRequest("POST", "/api/me/oauth/remove", strings.NewReader(form.Encode()))
-		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		w := httptest.NewRecorder()
+				cfg := config.New()
+				cfg.GenericOauth.ClientID = "client-disconnect-bypass-" + tc.name
+				// Deliberately the PERMISSIVE setting. If the allowlist check
+				// were accidentally skipped or short-circuited, the request
+				// would fall through to the AllowDisconnect gate, which would
+				// let it through (since it's true) rather than fail loudly --
+				// this setting means a passing test can only mean the
+				// allowlist itself did the rejecting, not that some other
+				// gate happened to also catch it.
+				cfg.GenericOauth.AllowDisconnect = true
+				app := &App{db: ds, cfg: cfg}
 
-		err = removeOauth(app, &User{ID: uid, Username: "disconnectme3"}, w, r)
-		require.Error(t, err, "removeOauth must refuse when AllowDisconnect is false, regardless of the provider value's case/padding")
-		httpErr, ok := err.(impart.HTTPError)
-		require.True(t, ok, "expected impart.HTTPError, got %T", err)
-		assert.Equal(t, http.StatusForbidden, httpErr.Status)
+				res, err := ds.Exec(
+					"INSERT INTO users (username, password, email, created) VALUES (?, ?, ?, NOW())",
+					"disconnect-"+tc.name, "x", nil)
+				require.NoError(t, err)
+				uid, err := res.LastInsertId()
+				require.NoError(t, err)
+				require.NoError(t, ds.RecordRemoteUserID(context.Background(), uid, "remote-"+tc.name, "generic", cfg.GenericOauth.ClientID, "tok"))
 
-		var n int
-		require.NoError(t, ds.QueryRow(
-			"SELECT COUNT(*) FROM oauth_users WHERE user_id = ? AND provider = 'generic' AND remote_user_id = ?",
-			uid, "remote-disconnect-3").Scan(&n))
-		assert.Equal(t, 1, n, "the oauth_users link must NOT be removed via a mixed-case/padded provider value bypass")
-	})
+				form := url.Values{
+					"provider":       {tc.provider},
+					"client_id":      {cfg.GenericOauth.ClientID},
+					"remote_user_id": {"remote-" + tc.name},
+				}
+				r := httptest.NewRequest("POST", "/api/me/oauth/remove", strings.NewReader(form.Encode()))
+				r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+				w := httptest.NewRecorder()
+
+				err = removeOauth(app, &User{ID: uid, Username: "disconnect-" + tc.name}, w, r)
+				require.Error(t, err, "removeOauth must reject a non-canonical provider value even when AllowDisconnect is true")
+				httpErr, ok := err.(impart.HTTPError)
+				require.True(t, ok, "expected impart.HTTPError, got %T", err)
+				assert.Equal(t, http.StatusBadRequest, httpErr.Status,
+					"a non-canonical provider value must be rejected by the allowlist (400), not fall through to the AllowDisconnect gate (403) or succeed (302)")
+
+				var n int
+				require.NoError(t, ds.QueryRow(
+					"SELECT COUNT(*) FROM oauth_users WHERE user_id = ? AND provider = 'generic' AND remote_user_id = ?",
+					uid, "remote-"+tc.name).Scan(&n))
+				assert.Equal(t, 1, n, "the oauth_users link must NOT be removed via a non-canonical provider value bypass")
+			})
+		})
+	}
 }
 
 // TestRemoveOauthAllowsGenericDisconnectWhenAllowed is the control case: the

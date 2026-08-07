@@ -449,3 +449,51 @@ func normalizeOauthUsername(mastodonUsername, remoteUserID string, taken func(st
 	}
 	return final
 }
+
+// knownOauthProviders is the exact, canonical set of provider identifiers
+// this codebase's OAuth clients report via GetProvider(): oauth_generic.go,
+// oauth_gitlab.go, oauth_gitea.go, oauth_slack.go, and oauth_writeas.go. It is
+// intentionally a fixed list of literal strings rather than something built
+// by instantiating those clients: GetProvider() returns a hardcoded literal
+// in every implementation (it doesn't depend on config), so duplicating the
+// five literals here needs no client construction (and thus no
+// clientID/secret/etc from config) just to ask what their provider strings
+// are. If a sixth OAuth client is ever added, its GetProvider() literal must
+// be added here too.
+var knownOauthProviders = map[string]bool{
+	"generic":  true,
+	"gitlab":   true,
+	"gitea":    true,
+	"slack":    true,
+	"write.as": true,
+}
+
+// isKnownOauthProvider reports whether provider is an EXACT match --
+// case-sensitive, untrimmed, no normalization of any kind -- for one of this
+// codebase's canonical OAuth provider identifiers.
+//
+// Why exact match and nothing looser: oauth_users.provider is a MariaDB
+// column using a case-insensitive, pad-insensitive, AND accent-insensitive
+// collation (utf8mb4_uca1400_ai_ci, confirmed via SHOW FULL COLUMNS). A
+// DELETE keyed on that column matches "generic", "Generic", " generic ",
+// "generíc", "genërìc", and even full-width "ｇｅｎｅｒｉｃ" all the same,
+// regardless of what Go-level string comparison guards it. Two earlier fixes
+// here tried to make a Go comparison agree with that collation by
+// normalizing harder -- first case-folding, then also trimming -- and both
+// were incomplete, because no finite normalization pipeline can cover
+// everything an arbitrary collation treats as equal (accent folding and
+// full-width-to-halfwidth folding are just the next two gaps; there is no
+// reason to believe they're the last).
+//
+// An allowlist sidesteps the problem instead of chasing it: it never asks
+// "does this value normalize to something the database would also treat as
+// generic?" -- a question that requires reverse-engineering the collation's
+// entire equivalence class. It only asks "is this value byte-for-byte
+// identical to one of the five strings we know are canonical?", which is a
+// question this code can answer completely on its own. Anything that isn't
+// an exact match -- including every one of the bypass strings above -- is
+// rejected before it reaches ANY comparison, Go's or the database's, that
+// could disagree about what counts as "generic".
+func isKnownOauthProvider(provider string) bool {
+	return knownOauthProviders[provider]
+}
