@@ -184,9 +184,18 @@ textarea.section.norm {
 				<option value="dark">Dark Mode</option>
 				<option value="serif">Serif Reader</option>
 				<option value="mono">Minimal Mono</option>
+				<option value="nord">Nord</option>
+				<option value="dracula">Dracula</option>
+				<option value="solarized-light">Solarized Light</option>
+				<option value="solarized-dark">Solarized Dark</option>
+				<option value="catppuccin">Catppuccin Mocha</option>
+				<option value="gruvbox">Gruvbox Dark</option>
+				<option value="rosepine">Ros&eacute; Pine</option>
+				<option value="highcontrast">High Contrast</option>
 			</select>
+			<div id="css-preset-preview" style="display:none; margin-bottom: .75rem;"></div>
 			<textarea id="css-editor" class="section codable" name="style_sheet">{{.StyleSheet}}</textarea>
-			<p class="explain">See our guide on <a href="https://writefreely.org/docs/latest/writer/css">customization</a>. Presets are a starting point &mdash; pick one, then tweak the CSS below. They replace whatever's currently in the box.</p>
+			<p class="explain">See our guide on <a href="https://writefreely.org/docs/latest/writer/css">customization</a>. Presets are a starting point &mdash; pick one to preview it, then Apply to replace whatever's currently in the box below.</p>
 		</div>
 	</div>
 
@@ -327,39 +336,161 @@ if (matchMedia('(pointer:fine)').matches) {
 // still what actually gets saved (and validated server-side, see
 // stylesheet.go). Keep presets free of @import/external url() so they never
 // trip that validation themselves.
+//
+// Colors on dark/serif/mono/nord/dracula/solarized*/catppuccin/gruvbox/rosepine
+// are published, freely-reused palette specs (Nord, Dracula, Solarized,
+// Catppuccin, Gruvbox, Rosé Pine) -- hex values, not code, so there's
+// nothing to attribute or license here. highcontrast is our own.
+function presetCSS(c) {
+	return "body, #collection {\n  background: " + c.bg + ";\n  color: " + c.fg + ";\n}\n\n" +
+		"#blog-title a,\n#blog-title a:visited {\n  color: " + c.title + ";\n}\n\n" +
+		"#post-body a {\n  color: " + c.link + ";\n}\n\n" +
+		"#post-body pre,\n#post-body code {\n  background: " + c.codeBg + ";\n  color: " + c.codeFg + ";\n}\n\n" +
+		"#post-body blockquote {\n  border-left: 3px solid " + c.accent + ";\n  color: " + c.fg + ";\n}\n\n" +
+		".description {\n  color: " + c.desc + ";\n}\n";
+}
+
 var cssPresets = {
 	dark: {
 		label: "Dark Mode",
+		colors: { bg: "#16181c", fg: "#d8dee4", title: "#ffffff", link: "#6cb6ff", accent: "#6cb6ff", codeBg: "#22252b", codeFg: "#d8dee4", desc: "#9aa4b1" },
 		css: "body, #collection {\n  background: #16181c;\n  color: #d8dee4;\n}\n\n#blog-title a,\n#blog-title a:visited {\n  color: #ffffff;\n}\n\n#post-body a {\n  color: #6cb6ff;\n}\n\n.description {\n  color: #9aa4b1;\n}\n"
 	},
 	serif: {
 		label: "Serif Reader",
+		colors: { bg: "#faf6ee", fg: "#2b2b2b", title: "#2b2b2b", link: "#a0522d", accent: "#a0522d", codeBg: "#f0e9db", codeFg: "#2b2b2b", desc: "#6b6b6b" },
 		css: "body, #collection {\n  background: #faf6ee;\n  color: #2b2b2b;\n  font-family: Georgia, 'Times New Roman', serif;\n}\n\n#post-body {\n  max-width: 40em;\n  margin: 0 auto;\n  line-height: 1.7;\n  font-size: 1.15em;\n}\n\n#blog-title a,\n#blog-title a:visited {\n  font-family: Georgia, serif;\n}\n"
 	},
 	mono: {
 		label: "Minimal Mono",
+		colors: { bg: "#ffffff", fg: "#111111", title: "#111111", link: "#111111", accent: "#111111", codeBg: "#f0f0f0", codeFg: "#111111", desc: "#555555" },
 		css: "body, #collection {\n  background: #ffffff;\n  color: #111111;\n  font-family: 'Courier New', Courier, monospace;\n}\n\n#blog-title a,\n#blog-title a:visited {\n  color: #111111;\n  text-transform: uppercase;\n  letter-spacing: 0.05em;\n}\n\n#post-body a {\n  color: #111111;\n  text-decoration: underline;\n}\n"
+	},
+	nord: {
+		label: "Nord",
+		colors: { bg: "#2e3440", fg: "#d8dee9", title: "#eceff4", link: "#88c0d0", accent: "#5e81ac", codeBg: "#3b4252", codeFg: "#e5e9f0", desc: "#81a1c1" }
+	},
+	dracula: {
+		label: "Dracula",
+		colors: { bg: "#282a36", fg: "#f8f8f2", title: "#ff79c6", link: "#8be9fd", accent: "#bd93f9", codeBg: "#44475a", codeFg: "#f8f8f2", desc: "#6272a4" }
+	},
+	"solarized-light": {
+		label: "Solarized Light",
+		colors: { bg: "#fdf6e3", fg: "#657b83", title: "#073642", link: "#268bd2", accent: "#b58900", codeBg: "#eee8d5", codeFg: "#586e75", desc: "#93a1a1" }
+	},
+	"solarized-dark": {
+		label: "Solarized Dark",
+		colors: { bg: "#002b36", fg: "#839496", title: "#fdf6e3", link: "#268bd2", accent: "#b58900", codeBg: "#073642", codeFg: "#93a1a1", desc: "#586e75" }
+	},
+	catppuccin: {
+		label: "Catppuccin Mocha",
+		colors: { bg: "#1e1e2e", fg: "#cdd6f4", title: "#cba6f7", link: "#89b4fa", accent: "#f5c2e7", codeBg: "#313244", codeFg: "#cdd6f4", desc: "#a6adc8" }
+	},
+	gruvbox: {
+		label: "Gruvbox Dark",
+		colors: { bg: "#282828", fg: "#ebdbb2", title: "#fabd2f", link: "#83a598", accent: "#fe8019", codeBg: "#3c3836", codeFg: "#ebdbb2", desc: "#a89984" }
+	},
+	rosepine: {
+		label: "Rosé Pine",
+		colors: { bg: "#191724", fg: "#e0def4", title: "#c4a7e7", link: "#9ccfd8", accent: "#f6c177", codeBg: "#26233a", codeFg: "#e0def4", desc: "#908caa" }
+	},
+	highcontrast: {
+		label: "High Contrast",
+		colors: { bg: "#000000", fg: "#ffffff", title: "#ffffff", link: "#ffff00", accent: "#ffffff", codeBg: "#1a1a1a", codeFg: "#ffffff", desc: "#cccccc" }
 	}
 };
 
+// Presets without a hand-written css string yet get one generated from their colors.
+Object.keys(cssPresets).forEach(function(key) {
+	var preset = cssPresets[key];
+	if (!preset.css) {
+		preset.css = presetCSS(preset.colors);
+	}
+});
+
 var $cssPreset = document.getElementById('css-preset');
-if ($cssPreset) {
+var $cssPreview = document.getElementById('css-preset-preview');
+
+function applyCurrentPreset() {
+	var preset = cssPresets[$cssPreset.value];
+	if (!preset) {
+		return;
+	}
+	if (typeof cssEditor !== 'undefined' && cssEditor) {
+		cssEditor.setValue(preset.css, -1);
+	} else {
+		document.getElementById('css-editor').value = preset.css;
+	}
+	$cssPreset.value = '';
+	renderCssPreview(null);
+}
+
+// DOM-built, not innerHTML -- every value here is our own hardcoded palette
+// data (never user input), but building it this way costs little and means
+// this function stays safe to copy from even if that ever changes.
+function el(tag, cssText, text) {
+	var e = document.createElement(tag);
+	if (cssText) {
+		e.style.cssText = cssText;
+	}
+	if (text !== undefined) {
+		e.textContent = text;
+	}
+	return e;
+}
+
+function clearChildren(node) {
+	while (node.firstChild) {
+		node.removeChild(node.firstChild);
+	}
+}
+
+function renderCssPreview(preset) {
+	clearChildren($cssPreview);
+	if (!preset) {
+		$cssPreview.style.display = 'none';
+		return;
+	}
+	var c = preset.colors;
+	$cssPreview.style.display = 'block';
+
+	var card = el('div', 'border:1px solid #ccc; border-radius:6px; padding:1rem; background:' + c.bg + '; color:' + c.fg + ';');
+	card.appendChild(el('div', 'font-weight:bold; font-size:1.15em; color:' + c.title + '; margin-bottom:.4em;', preset.label));
+	card.appendChild(el('p', 'margin:.4em 0;', 'The quick brown fox jumps over the lazy dog.'));
+	card.appendChild(el('p', 'margin:.4em 0; border-left:3px solid ' + c.accent + '; padding-left:.6em;', 'A quoted passage might look like this.'));
+	card.appendChild(el('code', 'display:inline-block; margin:.4em 0; padding:.15em .4em; border-radius:3px; background:' + c.codeBg + '; color:' + c.codeFg + ';', 'inline code'));
+	card.appendChild(document.createElement('br'));
+	card.appendChild(el('span', 'color:' + c.link + '; text-decoration:underline;', 'a sample link'));
+	card.appendChild(document.createTextNode(' · '));
+	card.appendChild(el('span', 'color:' + c.desc + ';', 'muted description text'));
+	$cssPreview.appendChild(card);
+
+	var applyBtn = el('button', null, 'Apply');
+	applyBtn.type = 'button';
+	applyBtn.id = 'css-preset-apply-btn';
+	applyBtn.className = 'proceed';
+	var cancelBtn = el('button', null, 'Cancel');
+	cancelBtn.type = 'button';
+	cancelBtn.id = 'css-preset-cancel-btn';
+
+	var controls = el('div', 'margin-top:.5rem;');
+	controls.appendChild(applyBtn);
+	controls.appendChild(document.createTextNode(' '));
+	controls.appendChild(cancelBtn);
+	$cssPreview.appendChild(controls);
+}
+
+if ($cssPreset && $cssPreview) {
 	$cssPreset.addEventListener('change', function() {
-		var preset = cssPresets[this.value];
-		this.value = ''; // reset so picking the same preset twice fires 'change' again
-		if (!preset) {
-			return;
-		}
+		renderCssPreview(cssPresets[this.value]);
+	});
 
-		var currentCSS = (typeof cssEditor !== 'undefined' && cssEditor) ? cssEditor.getValue() : document.getElementById('css-editor').value;
-		if (currentCSS.trim() !== '' && !confirm('Replace your current Custom CSS with the "' + preset.label + '" preset?')) {
-			return;
-		}
-
-		if (typeof cssEditor !== 'undefined' && cssEditor) {
-			cssEditor.setValue(preset.css, -1);
-		} else {
-			document.getElementById('css-editor').value = preset.css;
+	$cssPreview.addEventListener('click', function(e) {
+		if (e.target && e.target.id === 'css-preset-apply-btn') {
+			applyCurrentPreset();
+		} else if (e.target && e.target.id === 'css-preset-cancel-btn') {
+			$cssPreset.value = '';
+			renderCssPreview(null);
 		}
 	});
 }
