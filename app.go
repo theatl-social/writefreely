@@ -84,6 +84,30 @@ type App struct {
 	updates      *updatesCache
 
 	timeline *localTimeline
+
+	// theATL fork: a small, dedicated connection pool used ONLY for pinning
+	// the GET_LOCK()/RELEASE_LOCK() connection withOauthIdentityLock
+	// (oauth_preauth.go) needs for its MariaDB session-scoped advisory lock.
+	// Deliberately a SEPARATE *sql.DB from db's own pool (MaxOpenConns 50 --
+	// see connectToDatabase below), not a second reference to the same one.
+	//
+	// withOauthIdentityLock used to pin a connection from db's own pool for
+	// the full duration of the guarded work, while that work's own queries
+	// (GetIDForRemoteUser, CreateUser, etc.) ran through the SAME pool. Under
+	// enough concurrent callers, every one of the pool's 50 connections ends
+	// up pinned by a lock-holder that is itself blocked waiting for a SECOND
+	// connection from that same, now-exhausted pool -- a hard deadlock that
+	// starves the entire application, not just OAuth logins, because nothing
+	// ever frees a connection. Giving the lock's pinned connection its own
+	// small pool, fully decoupled from db's, makes that starvation
+	// structurally impossible: no matter how many identities are locked
+	// concurrently, pinning connections in THIS pool can never compete for or
+	// consume connections the rest of the app (including the lock's own
+	// guarded work) needs from db's pool.
+	//
+	// nil for sqlite, where withOauthIdentityLock is a no-op passthrough
+	// anyway (see that function's doc comment) and this is never dereferenced.
+	oauthLockDB *sql.DB
 }
 
 // DB returns the App's datastore
@@ -626,6 +650,10 @@ func ConnectToDatabase(app *App) error {
 	if err := app.db.ensureMaxBlogsColumn(); err != nil {
 		return fmt.Errorf("ensure max_blogs column: %s", err)
 	}
+	// theATL fork: ensure the OAuth pre-authorization table exists. See FORK.md.
+	if err := app.db.ensureOauthPreauthTable(); err != nil {
+		return fmt.Errorf("ensure oauth_preauth table: %s", err)
+	}
 	// theATL fork: log the resolved fallback so a missing or misspelled
 	// max_blogs is visible at boot rather than silently unlimited. See FORK.md.
 	log.Info("max_blogs: per-user fallback is %d (0 means unlimited)", app.cfg.App.MaxBlogs)
@@ -973,13 +1001,21 @@ func ModerateUsers(apper Apper, filter UserFilter, action UserAction) error {
 	return nil
 }
 
+// mysqlDSN builds the DSN connectToDatabase uses for the main pool. Factored
+// out (theATL fork) so the second, dedicated oauthLockDB pool below can open
+// against the exact same server/database/credentials/TLS settings without
+// duplicating the format string and risking the two drifting apart.
+func mysqlDSN(cfg *config.Config) string {
+	return fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=true&loc=%s&tls=%t", cfg.Database.User, cfg.Database.Password, cfg.Database.Host, cfg.Database.Port, cfg.Database.Database, url.QueryEscape(time.Local.String()), cfg.Database.TLS)
+}
+
 func connectToDatabase(app *App) {
 	log.Info("Connecting to %s database...", app.cfg.Database.Type)
 
 	var db *sql.DB
 	var err error
 	if app.cfg.Database.Type == driverMySQL {
-		db, err = sql.Open(app.cfg.Database.Type, fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=true&loc=%s&tls=%t", app.cfg.Database.User, app.cfg.Database.Password, app.cfg.Database.Host, app.cfg.Database.Port, app.cfg.Database.Database, url.QueryEscape(time.Local.String()), app.cfg.Database.TLS))
+		db, err = sql.Open(app.cfg.Database.Type, mysqlDSN(app.cfg))
 		db.SetMaxOpenConns(50)
 	} else if app.cfg.Database.Type == driverSQLite {
 		if !SQLiteEnabled {
@@ -1001,11 +1037,33 @@ func connectToDatabase(app *App) {
 		os.Exit(1)
 	}
 	app.db = &datastore{DB: db, driverName: app.cfg.Database.Type}
+
+	// theATL fork: open the small, separate pool withOauthIdentityLock pins
+	// its advisory-lock connection from (see the App.oauthLockDB field doc
+	// comment for why this must NOT share app.db's pool). Only meaningful for
+	// mysql -- withOauthIdentityLock is an unconditional no-op passthrough
+	// under sqlite, so app.oauthLockDB is left nil there and never
+	// dereferenced.
+	if app.cfg.Database.Type == driverMySQL {
+		lockDB, err := sql.Open(app.cfg.Database.Type, mysqlDSN(app.cfg))
+		if err != nil {
+			log.Error("%s", err)
+			os.Exit(1)
+		}
+		lockDB.SetMaxOpenConns(oauthIdentityLockPoolMaxOpenConns)
+		app.oauthLockDB = lockDB
+	}
 }
 
 func shutdown(app *App) {
 	log.Info("Closing database connection...")
 	app.db.Close()
+	// theATL fork: close the separate oauthLockDB pool too (see App's field
+	// doc comment and connectToDatabase above) -- nil under sqlite, where it
+	// was never opened.
+	if app.oauthLockDB != nil {
+		app.oauthLockDB.Close()
+	}
 	if strings.HasPrefix(app.cfg.Server.Bind, "/") {
 		// Clean up socket
 		log.Info("Removing socket file...")

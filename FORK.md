@@ -16,12 +16,38 @@ per-user limit so membership tiers map to real blog allowances.
 | `max_blogs` column on `users`, added idempotently at boot | `maxblogs.go`, called from `app.go` `ConnectToDatabase` |
 | Limit enforced when a blog is created | `maxblogs.go` `checkBlogLimit`, called from `collections.go` `newCollection` |
 | Limit also enforced on the claim-posts path | `maxblogs.go` `countRequestedNewBlogs` + `checkBlogLimitN`, called from `posts.go` `addPost` |
-| `POST /api/internal/user/{username}/max-blogs` to set a user's limit | `maxblogs_api.go`, registered in `routes.go` |
 | "New blog" UI affordance gated on the user's own allowance, not the instance-wide fallback | `account.go` `viewCollections`, via `checkBlogLimit` |
+| `SetUserMaxBlogs` — the datastore method that actually writes the column | `maxblogs_api.go` |
 
-Everything else is upstream. The internal endpoint requires the
+The setter used to have its own dedicated endpoint
+(`POST /api/internal/user/{username}/max-blogs`). That endpoint was removed
+entirely by the OAuth JIT provisioning work below — `SetUserMaxBlogs` is now
+called from the newer, identity-keyed endpoint instead, because a member can
+have an allowance pushed before their account (and therefore their username)
+exists at all.
+
+**OAuth just-in-time (JIT) account provisioning.** The member site
+pre-authorizes a Mastodon identity for the OAuth path over the internal
+network, in advance of any login. On that identity's first real OAuth
+callback, this fork creates the local WriteFreely account automatically
+instead of falling through to upstream's manual signup page — there is no
+self-serve, in-app account creation on this OAuth path at all.
+
+| Change | Location |
+|---|---|
+| JIT branch: on OAuth callback, if the identity isn't linked yet, check `oauth_preauth` for a pending grant and create + link the account automatically | `oauth.go` `viewOauthCallback` |
+| `oauth_preauth` table (`remote_user_id`/`provider`/`client_id` → `max_blogs`), added idempotently at boot — same non-migration reasoning as `max_blogs` (see below) | `oauth_preauth.go` `ensureOauthPreauthTable`, called from `app.go` `ConnectToDatabase` |
+| `POST /api/internal/mastodon-user/{remoteUserID}/max-blogs` — replaces the old username-keyed setter above. Pre-account, upserts or deletes the `oauth_preauth` row; post-account, updates `users.max_blogs` directly. `max_blogs: 0` is a distinct revoke signal, not a rejected value (see "Known limits") | `oauth_preauth.go` `handleSetMastodonUserMaxBlogs`, registered in `routes.go` |
+| Mastodon username → WriteFreely username normalization (strips invalid characters, falls back through suffixed/remote-ID-keyed tiers on collision or reserved-word rejection) | `oauth_preauth.go` `normalizeOauthUsername` |
+| `POST /oauth/signup` (upstream's manual account-linking page after OAuth) is deliberately NOT registered — its only gate, `HashTokenParams`, is an HMAC keyed on `Server.HashSeed`, which is empty (unset) in this fork's config and therefore trivially forgeable. The handler code still exists, unrouted, in `oauth_signup.go` | `oauth.go` `configureOauthRoutes` |
+| `removeOauth` enforces `GenericOauth.AllowDisconnect` in code before disconnecting a "generic" (Mastodon) link — upstream only hid the button in the settings template, so a direct POST bypassed it regardless of config. Matters more here than on a stock instance: every account is OAuth-JIT-provisioned and therefore passwordless and emailless, so disconnecting is unrecoverable | `account.go` `removeOauth` |
+| OAuth provider value is checked against an exact-match allowlist before any DB delete, not a normalized comparison — closes a bypass where MariaDB's `utf8mb4_uca1400_ai_ci` collation treats case/accent/full-width variants as equal to `"generic"` even when a Go-level normalization doesn't | `oauth_preauth.go` `isKnownOauthProvider`/`knownOauthProviders`, called from `account.go` `removeOauth` |
+| Per-identity MariaDB advisory lock (`GET_LOCK`/`RELEASE_LOCK`, keyed on a SHA-256 hash of remote_user_id+provider+client_id) serializes the JIT login path against the internal endpoint's check-then-write. Closes a TOCTOU race where neither side has a row to lock via `SELECT ... FOR UPDATE`, because neither `oauth_preauth` nor `oauth_users` necessarily exists yet when either path starts | `oauth_preauth.go` `withOauthIdentityLock`, called from `oauth.go` `viewOauthCallback` and `oauth_preauth.go` `handleSetMastodonUserMaxBlogs` |
+| Dedicated `app.oauthLockDB` connection pool, separate from the main pool, pins the advisory-lock connection — an earlier version pinned from the main pool and could deadlock the whole app under load (see "Known limits" for the pool's own tradeoff) | `app.go` `App.oauthLockDB` field, `connectToDatabase` |
+
+Everything else is upstream. Both internal endpoints require the
 `WRITEFREELY_API_SECRET` environment variable (32+ characters) in an
-`X-WriteFreely-Secret` header, and is additionally blocked at our reverse proxy.
+`X-WriteFreely-Secret` header, and are additionally blocked at our reverse proxy.
 
 ## Why the schema change avoids the migration system
 
@@ -33,10 +59,18 @@ the merge surface entirely.
 
 ## Merge policy
 
-Only `app.go`, `account.go`, `collections.go`, `routes.go`, and `posts.go` are
-modified, by one line or a short block each, all marked with `theATL fork:`
-comments. Merge upstream releases onto `theatl-main`; conflicts should be
-confined to those five files.
+Only `app.go`, `account.go`, `collections.go`, `routes.go`, `posts.go`, and
+`oauth.go` are modified, by one line or a short block each, all marked with
+`theATL fork:` comments. Merge upstream releases onto `theatl-main`; conflicts
+should be confined to those six files.
+
+Wholly new, fork-owned files — `maxblogs.go`, `maxblogs_api.go`,
+`oauth_preauth.go`, and their `_test.go` counterparts — carry their own full
+copyright header instead of a `theATL fork:` comment on an upstream line, and
+are not part of this budget: there is no upstream version of them to conflict
+with. `oauth_signup.go` is unmodified upstream code left in place but
+unrouted (see the "What diverges" table above) — also not on this budget,
+since nothing in it was changed.
 
 Three extra steps, each earned by something that already bit us or nearly did:
 
@@ -49,29 +83,42 @@ Three extra steps, each earned by something that already bit us or nearly did:
   (gated at the handler), and `CreateCollectionFromToken` (`database.go:290`,
   zero callers). If upstream wires the third to a route, the cap silently gains
   a hole and `database.go` is off our budget.
-- **Bump the AGPL §5(a) notice count** — it is five files now.
+- **Bump the AGPL §5(a) notice count** — it is six files now.
 
 ## Known upstream test failures
 
-CI skips exactly these two **subtests** by their fully slash-qualified path
+CI skips exactly this one **subtest** by its fully slash-qualified path
 (see `.github/workflows/ci.yml`'s `Test` step — the `/subtest` qualifier matters:
 without it, `-skip` matches the parent test name and drops every subtest beneath
 it, e.g. all five of `TestUpdatesRoundTrip`'s subtests instead of just the one
-that's broken). Both are pre-existing at v0.17.1, in files outside the
+that's broken). It is pre-existing at v0.17.1, in a file outside the
 merge-surface budget above, and unrelated to anything in this fork:
 
-- `TestViewOauthCallback/success` (`oauth_test.go`) — the test's mock config never
-  sets `App.OpenRegistration`, so `oauth.go`'s registration-blocked branch fires
-  and returns a redirect the test doesn't expect. (Only subtest on this test
-  today; qualified anyway so it stays correct if upstream adds more.)
 - `TestUpdatesRoundTrip/Release_URL` (`updates_test.go`) — a race: the cache's
   version-check network call runs in an unsynchronized goroutine, and the
   `Release_URL` subtest reads the result before it's populated. The other four
   subtests (`New_Updates_Cache`, `Check_Now`, `Are_Available`, `Latest_Version`)
   are unaffected and run normally.
 
-Revisit both on every upstream merge and delete the corresponding `-skip` entry
-the moment a release fixes the underlying subtest.
+Revisit on every upstream merge. Delete this entry the moment a release fixes
+the underlying race.
+
+`TestViewOauthCallback/success` (`oauth_test.go`) used to have a matching
+entry here too, for a rationale that went stale (a pre-existing,
+fork-unrelated redirect-assertion mismatch) and was superseded by a different,
+current problem: this subtest predates the fork's OAuth JIT provisioning work
+(`oauth.go`, `oauth_preauth.go`), and the JIT branch now runs unconditionally
+before the registration-blocked branch this subtest was written to exercise,
+calling `app.db.GetOauthPreauth` via the concrete `*datastore` — a call this
+subtest's intentionally-nil `app.db` can't serve, so it panics instead of
+returning the redirect the test expects. A panic here would abort the whole
+package test binary, silently taking this fork's own
+`TestViewOauthCallbackJITProvisioning` and `TestOauthSignupRouteIsNotRegistered`
+down with it. The subtest now carries its own `t.Skip` (`oauth_test.go`) with
+this explanation, which fully supersedes the CI-level entry, so the entry has
+been removed from `-skip` rather than kept for history. If a future upstream
+merge changes this subtest enough that the in-code skip stops applying, judge
+it fresh rather than restoring a CI-level entry on the old rationale.
 
 ## CI divergence
 
@@ -105,3 +152,69 @@ detective, not preventive: the member site's nightly audit should compare each
 user's *actual* blog count against their allowance, not only push allowances
 one-way — so an overshoot gets caught and reconciled rather than silently
 persisting.
+
+**In-app self-serve signup is closed by infrastructure, not by this repo.**
+Two signup routes exist (`routes.go`) and they are not equivalent:
+
+- `POST /api/auth/signup` IS gated by `open_registration` in config, at
+  route-registration time — the handler is only mounted at all when
+  `open_registration` is true.
+- `POST /auth/signup` is registered UNCONDITIONALLY, regardless of
+  `open_registration`. Its in-app check (`unregisteredusers.go`'s
+  `handleWebSignup`) only rejects when `open_registration` is false AND the
+  submitted `invite_code` form field is empty — ANY non-empty `invite_code`
+  bypasses that check. The code is never validated against the database
+  before the account is created: `account.go`'s `signupWithRegistration`
+  calls `CreateUser` first, and only afterward calls `database.go`'s
+  `CreateInvitedUser`, which is a bare insert into `usersinvited` recording
+  that this user supplied some invite code string — it does not check that
+  the code exists, is unexpired, or is unused. So `open_registration = false`
+  provides no real protection on `/auth/signup` at all; the only actual gate
+  on that route in this deployment is an external HAProxy ACL that lives
+  entirely outside this repository, not any config value in this app.
+
+Only the OAuth JIT path (`oauth.go`, `oauth_preauth.go`) enforces its access
+gate in code, unconditionally, via the `oauth_preauth` table. Don't conflate
+any of these when reasoning about what's "closed" on this instance.
+
+**A revoked/deleted account can still be re-provisioned by a later login.**
+`handleSetMastodonUserMaxBlogs` (`oauth_preauth.go`) now supports a
+`max_blogs: 0` "revoke" signal that deletes an unconsumed `oauth_preauth`
+row outright, closing the gap where a cancelled membership that never logged
+in kept a permanently valid grant. That is scoped narrowly to *pending*
+grants, though: it says nothing about an account an admin has already
+deleted at the database level. If the member site pushes a fresh allowance
+for that same Mastodon identity after such a deletion (as its normal nightly
+sync would), `GetIDForRemoteUser` reports "not linked" (the `oauth_users` row
+is gone too), a new `oauth_preauth` row is written, and the member's next
+login re-provisions a brand-new account under the same identity. Deliberately
+not addressed here — narrower fixes (an explicit tombstone/deny-list keyed on
+`remote_user_id`, or having the member site's deletion flow revoke first)
+are possible, but out of scope for this round; noted so it isn't confused for
+an oversight in the revoke fix above.
+
+**The advisory-lock connection pool can head-of-line-block an uncontested
+identity.** `app.oauthLockDB` (`app.go`) has `oauthIdentityLockPoolMaxOpenConns`
+(8) connections total, shared by every call to `withOauthIdentityLock`
+(`oauth_preauth.go`) regardless of which identity it locks. The *named*
+MariaDB lock itself is correctly per-identity — two callers locking different
+identities never wait on each other's `GET_LOCK`. But both still have to pin
+a connection out of the same 8-slot pool first. Under enough concurrent
+callers saturating *other* identities, a caller for a completely uncontested
+identity can queue behind them for a free pool connection before it ever
+gets to call `GET_LOCK` for its own lock name — a real wait, bounded by
+`oauthIdentityLockTimeoutSeconds` (10s) plus the request's own context
+deadline, after which it fails closed with an error rather than proceeding
+unsynchronized. Found during review, not from a production incident. Accepted
+as-is: 8 was sized for one community's Mastodon membership logging in (see
+the constant's doc comment) — nowhere near internet-scale concurrency, so
+this queueing depth doesn't bite in practice at this deployment's traffic
+levels; revisit the constant if that assumption stops holding.
+
+**Combined connection budget across the two pools.** The main pool
+(`app.db`, `connectToDatabase`) is capped at `MaxOpenConns(50)`; the lock
+pool (`app.oauthLockDB`) adds up to 8 more on top — 58 MariaDB connections
+total from this process, plus whatever else shares that server. Fine at this
+deployment's scale (one community instance behind one reverse proxy, not
+internet-scale traffic); re-check MariaDB's `max_connections` and what else
+contends for it before raising either number.

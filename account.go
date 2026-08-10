@@ -10,7 +10,8 @@
 
 /*
  * Modified 2026 by theATL.social: gate the new-blog affordance on the user's
- * per-user allowance. See FORK.md for the full list of changes.
+ * per-user allowance, and gate removeOauth on GenericOauth.AllowDisconnect.
+ * See FORK.md for the full list of changes.
  */
 
 package writefreely
@@ -1542,6 +1543,50 @@ func removeOauth(app *App, u *User, w http.ResponseWriter, r *http.Request) erro
 	provider := r.FormValue("provider")
 	clientID := r.FormValue("client_id")
 	remoteUserID := r.FormValue("remote_user_id")
+
+	// theATL fork: reject any provider value that isn't an EXACT match for one
+	// of this codebase's canonical OAuth provider identifiers, before the
+	// AllowDisconnect gate below and before any database call. This replaces
+	// two earlier attempts that tried to close a bypass by normalizing the
+	// form value harder (first case-folding, then also trimming) so it would
+	// agree with oauth_users.provider's case-/pad-/accent-insensitive MariaDB
+	// collation (utf8mb4_uca1400_ai_ci) -- both were incomplete, since no
+	// normalization pipeline can fully mirror an arbitrary collation, and an
+	// adversarial review proved it by getting provider=generíc, genërìc, and
+	// full-width ｇｅｎｅｒｉｃ past the normalized Go-level check while the
+	// collation still matched them to the "generic" row for the DELETE. See
+	// isKnownOauthProvider (oauth_preauth.go) for why an allowlist doesn't
+	// have that failure mode: it never has to predict what the database
+	// considers equal to "generic", it only accepts the literal string.
+	if !isKnownOauthProvider(provider) {
+		return impart.HTTPError{Status: http.StatusBadRequest, Message: "Unrecognized OAuth provider."}
+	}
+
+	// theATL fork: reject disconnecting a "generic" (Mastodon) OAuth link
+	// unless it's explicitly allowed by config. Upstream's only gate on this
+	// was templates/user/settings.tmpl hiding the disconnect button for the
+	// generic provider when GenericOauth.AllowDisconnect is false -- the
+	// handler itself enforced nothing, so a direct POST here bypassed that UI
+	// gate regardless of config. That matters far more on this deployment
+	// than on a stock instance: every account here is provisioned via OAuth
+	// JIT (oauth.go) and is therefore guaranteed passwordless and emailless
+	// (see FORK.md), so disconnecting one is permanent and unrecoverable --
+	// there is no password login and no email for password reset. Worse, the
+	// next allowance push plus a subsequent login then creates a SECOND,
+	// differently-suffixed account for the same Mastodon identity, since
+	// oauth_users' unique key is (user_id, provider, client_id), not
+	// (remote_user_id, provider, client_id) -- nothing at the DB level
+	// prevents that duplicate either. config.ini.example ships
+	// allow_disconnect = false for exactly this reason; only the "generic"
+	// provider is gated here because it's the only one the settings template
+	// gates (see viewSettings above, and FORK.md). Comparing with Go's
+	// case-sensitive == is safe here specifically because the allowlist check
+	// above already guarantees provider is byte-for-byte one of the five
+	// canonical strings -- there is no longer a normalization step whose
+	// completeness this comparison depends on.
+	if provider == "generic" && !app.Config().GenericOauth.AllowDisconnect {
+		return impart.HTTPError{Status: http.StatusForbidden, Message: "Disconnecting this account is not allowed on this instance."}
+	}
 
 	err := app.db.RemoveOauth(r.Context(), u.ID, provider, clientID, remoteUserID)
 	if err != nil {

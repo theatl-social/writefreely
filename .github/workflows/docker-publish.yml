@@ -11,10 +11,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
 
     steps:
-      # theATL fork: this job holds packages: write against the GHCR registry
+      # theATL fork: this job holds credentials for the Docker Hub registry
       # our production host pulls from, so every action here is pinned to an
       # exact release, not a floating major tag (the same reasoning that ruled
       # out trufflehog@main in ci.yml).
@@ -39,15 +38,18 @@ jobs:
         run: echo "value=$(git describe --tags --match 'v*' --abbrev=7 | sed 's/^v//')" >> "$GITHUB_OUTPUT"
 
       # theATL fork: pinned to an exact release, not a floating major tag.
+      # No `registry:` — Docker Hub is docker/login-action's default when
+      # one isn't given. DOCKERHUB_USERNAME/DOCKERHUB_TOKEN are repo secrets;
+      # the token must be an access token (Docker Hub account settings ->
+      # Personal access tokens), not the account password.
       - uses: docker/login-action@v4.6.0
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       # theATL fork: pinned to an exact release, not a floating major tag.
       - uses: docker/build-push-action@v7.3.0
         with:
           context: .
           push: true
-          tags: ghcr.io/theatl-social/writefreely:${{ steps.tag.outputs.value }}
+          tags: mikehdev/writefreely:${{ steps.tag.outputs.value }}

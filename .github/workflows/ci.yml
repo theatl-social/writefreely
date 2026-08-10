@@ -39,7 +39,7 @@ jobs:
       # Upstream v0.17.1 has never run go vet in CI and carries ~290 pre-existing
       # findings (268 `composites` alone, plus printf, structtag, unreachable,
       # copylocks) across a dozen files. Those files are far outside the
-      # three-file merge-surface budget that is this fork's entire premise, so
+      # six-file merge-surface budget that is this fork's entire premise, so
       # they are not ours to fix.
       #
       # Every analyzer therefore stays ENABLED — nothing is turned off — and the
@@ -90,24 +90,14 @@ jobs:
           mysql -h 127.0.0.1 -u root -pci_root_pw \
             -e "GRANT ALL PRIVILEGES ON *.* TO 'writefreely'@'%'; FLUSH PRIVILEGES;"
 
-      # Exactly two upstream SUBTESTS are genuinely broken at v0.17.1, independent
-      # of database schema or privileges, and are skipped by their fully
+      # One upstream SUBTEST is genuinely broken at v0.17.1, independent of
+      # database schema or privileges, and is skipped by its fully
       # slash-qualified subtest path rather than at the parent-test level, so
       # every other subtest (and every other upstream test) keeps gating our
       # changes. Without the "/subtest" qualifier, `-skip` matches the parent
       # test name and drops every subtest beneath it — e.g. TestUpdatesRoundTrip
       # has five subtests (New Updates Cache, Release URL, Check Now, Are
       # Available, Latest Version) and only "Release URL" is broken.
-      #
-      # - TestViewOauthCallback/success (oauth_test.go): the test's mock config
-      #   (built via config.New(), oauth_test.go:79-97) never sets
-      #   App.OpenRegistration, leaving it at the Go zero-value `false`. The
-      #   handler (oauth.go:399-404) then takes its registration-blocked branch
-      #   and returns `/login` as a redirect-encoded error, which the test's
-      #   assert.NoError flags as unexpected. Pre-existing at v0.17.1;
-      #   oauth.go/oauth_test.go are outside the three-file merge-surface budget.
-      #   (This test has only the one subtest today; qualified anyway so it
-      #   stays correct if upstream adds more.)
       #
       # - TestUpdatesRoundTrip/Release_URL (updates_test.go): newUpdatesCache
       #   (updates.go:98-105) launches its version-check network call in
@@ -117,11 +107,22 @@ jobs:
       #   immediately after construction — a race, not a network-outage symptom
       #   (reproduces identically whether or not the network call itself
       #   succeeds). Pre-existing at v0.17.1; updates.go/updates_test.go are
-      #   outside the three-file merge-surface budget. The other four
+      #   outside the six-file merge-surface budget. The other four
       #   TestUpdatesRoundTrip subtests are unaffected and must keep running.
       #
-      # Revisit both on every upstream merge; delete the corresponding -skip
-      # entry the moment a release fixes the underlying subtest.
+      # TestViewOauthCallback/success (oauth_test.go) used to have its own entry
+      # here too, for a rationale that went stale (a redirect-assertion mismatch
+      # pre-dating this fork's OAuth work) and was then superseded by a second,
+      # current reason (a nil-app.db panic from the fork's unconditional JIT
+      # branch). That subtest now carries its own in-code `t.Skip` (oauth_test.go)
+      # with the current reasoning, which is sufficient on its own -- an entry
+      # here would be redundant, not load-bearing, so it has been removed rather
+      # than kept "for history". If a future upstream merge changes this subtest
+      # enough that the in-code skip stops applying, judge it fresh against
+      # oauth_test.go rather than restoring this entry on the old rationale.
+      #
+      # Revisit on every upstream merge; delete this entry the moment a release
+      # fixes the underlying newUpdatesCache race.
       - name: Test
         env:
           TEST_MYSQL: '1'
@@ -129,7 +130,7 @@ jobs:
           WF_PASSWORD: ci_pw
           WF_DB: writefreely
           WF_HOST: 127.0.0.1
-        run: go test -vet=off -tags='netgo sqlite' -skip 'TestViewOauthCallback/success|TestUpdatesRoundTrip/Release_URL' ./... -v
+        run: go test -vet=off -tags='netgo sqlite' -skip 'TestUpdatesRoundTrip/Release_URL' ./... -v
 
   secret-scan:
     runs-on: ubuntu-latest

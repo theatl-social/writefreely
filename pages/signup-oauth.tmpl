@@ -63,7 +63,11 @@ form dd {
 	</ul>{{end}}
 
     <div id="billing">
-	    <form action="/oauth/signup" method="post" style="text-align: center;margin-top:1em;" onsubmit="return disableSubmit()">
+	    {{/* theATL fork: POST /oauth/signup is no longer registered (oauth.go) -- this
+	         page can't currently be reached by any flow, but the action target is
+	         corrected to "#" here so a future reader isn't misled into thinking that
+	         route still exists. See FORK.md. */}}
+	    <form action="#" method="post" style="text-align: center;margin-top:1em;" onsubmit="return disableSubmit()">
 	        <input type="hidden" name="access_token" value="{{ .AccessToken }}" />
 	        <input type="hidden" name="token_username" value="{{ .TokenUsername }}" />
 	        <input type="hidden" name="token_alias" value="{{ .TokenAlias }}" />
