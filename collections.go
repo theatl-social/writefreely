@@ -1318,6 +1318,17 @@ func existingCollection(app *App, w http.ResponseWriter, r *http.Request) error 
 		}
 	}
 
+	if err := validateStyleSheet(c.StyleSheet); err != nil {
+		if httpErr, ok := err.(impart.HTTPError); ok {
+			if reqJSON {
+				return httpErr
+			}
+			addSessionFlash(app, w, r, httpErr.Message, nil)
+			return impart.HTTPError{http.StatusFound, "/me/c/" + collAlias}
+		}
+		return err
+	}
+
 	err = app.db.UpdateCollection(app, &c, collAlias)
 	if err != nil {
 		if err, ok := err.(impart.HTTPError); ok {

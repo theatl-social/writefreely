@@ -178,8 +178,15 @@ textarea.section.norm {
 	<div class="option">
 		<h2>Custom CSS</h2>
 		<div class="section">
+			<label for="css-preset" style="display:block; margin-bottom: .5rem;">Start from a preset</label>
+			<select id="css-preset" style="margin-bottom: .75rem;">
+				<option value="">Choose a preset&hellip;</option>
+				<option value="dark">Dark Mode</option>
+				<option value="serif">Serif Reader</option>
+				<option value="mono">Minimal Mono</option>
+			</select>
 			<textarea id="css-editor" class="section codable" name="style_sheet">{{.StyleSheet}}</textarea>
-			<p class="explain">See our guide on <a href="https://writefreely.org/docs/latest/writer/css">customization</a>.</p>
+			<p class="explain">See our guide on <a href="https://writefreely.org/docs/latest/writer/css">customization</a>. Presets are a starting point &mdash; pick one, then tweak the CSS below. They replace whatever's currently in the box.</p>
 		</div>
 	</div>
 
@@ -313,6 +320,48 @@ if (matchMedia('(pointer:fine)').matches) {
 	cssEditor.session.setMode("ace/mode/css");
 	cssEditor.setOptions(opt);
 	cssEditor.resize(true);
+}
+
+// theATL fork: preset CSS starting points. Client-side only -- the <select>
+// isn't a form field, it just fills in the existing Custom CSS box, which is
+// still what actually gets saved (and validated server-side, see
+// stylesheet.go). Keep presets free of @import/external url() so they never
+// trip that validation themselves.
+var cssPresets = {
+	dark: {
+		label: "Dark Mode",
+		css: "body, #collection {\n  background: #16181c;\n  color: #d8dee4;\n}\n\n#blog-title a,\n#blog-title a:visited {\n  color: #ffffff;\n}\n\n#post-body a {\n  color: #6cb6ff;\n}\n\n.description {\n  color: #9aa4b1;\n}\n"
+	},
+	serif: {
+		label: "Serif Reader",
+		css: "body, #collection {\n  background: #faf6ee;\n  color: #2b2b2b;\n  font-family: Georgia, 'Times New Roman', serif;\n}\n\n#post-body {\n  max-width: 40em;\n  margin: 0 auto;\n  line-height: 1.7;\n  font-size: 1.15em;\n}\n\n#blog-title a,\n#blog-title a:visited {\n  font-family: Georgia, serif;\n}\n"
+	},
+	mono: {
+		label: "Minimal Mono",
+		css: "body, #collection {\n  background: #ffffff;\n  color: #111111;\n  font-family: 'Courier New', Courier, monospace;\n}\n\n#blog-title a,\n#blog-title a:visited {\n  color: #111111;\n  text-transform: uppercase;\n  letter-spacing: 0.05em;\n}\n\n#post-body a {\n  color: #111111;\n  text-decoration: underline;\n}\n"
+	}
+};
+
+var $cssPreset = document.getElementById('css-preset');
+if ($cssPreset) {
+	$cssPreset.addEventListener('change', function() {
+		var preset = cssPresets[this.value];
+		this.value = ''; // reset so picking the same preset twice fires 'change' again
+		if (!preset) {
+			return;
+		}
+
+		var currentCSS = (typeof cssEditor !== 'undefined' && cssEditor) ? cssEditor.getValue() : document.getElementById('css-editor').value;
+		if (currentCSS.trim() !== '' && !confirm('Replace your current Custom CSS with the "' + preset.label + '" preset?')) {
+			return;
+		}
+
+		if (typeof cssEditor !== 'undefined' && cssEditor) {
+			cssEditor.setValue(preset.css, -1);
+		} else {
+			document.getElementById('css-editor').value = preset.css;
+		}
+	});
 }
 </script>
 
