@@ -125,7 +125,7 @@ func (app *App) checkBlogLimitN(userID int64, wanted int) error {
 	if count+uint64(wanted) > uint64(limit) {
 		return impart.HTTPError{
 			Status:  http.StatusForbidden,
-			Message: "You've reached the number of blogs included with your membership.",
+			Message: "You've reached the number of blogs included with your membership. You can delete an existing blog to free up a spot, or upgrade your membership for more.",
 		}
 	}
 	return nil

@@ -33,6 +33,10 @@
 				<input type="submit" value="Create" id="create-collection-btn">
 			</h4>
 		</form>
+		{{else}}
+		{{/* theATL fork: previously this state showed nothing at all -- no button,
+		no explanation -- leaving a member to wonder why "New blog" had vanished. */}}
+		<p class="description">You've reached the number of blogs included with your membership. Delete an existing blog to free up a spot, or upgrade your membership for more.</p>
 		{{end}}
 	</li>
 </ul>
