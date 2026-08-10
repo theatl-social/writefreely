@@ -75,8 +75,14 @@ form dd {
 	</div>
 
 	<div{{if not .OpenRegistration}} style="padding: 2em 0;"{{end}}>
+		{{/* theATL fork: upstream tied the OAuth login button to OpenRegistration, so an instance
+		that closes password signup but configures OAuth (this fork's whole model) fell through to
+		"Registration is currently closed... sign up on another instance" -- misleading for members
+		who should just sign in. Render oauth-buttons unconditionally (it already no-ops if no
+		provider is enabled); only the "closed, go elsewhere" fallback below is now gated on OAuth
+		also being unavailable. */}}
+		{{template "oauth-buttons" .}}
 		{{ if .OpenRegistration }}
-			{{template "oauth-buttons" .}}
 		{{if not .DisablePasswordAuth}}
 		{{if .Flashes}}<ul class="errors">
 			{{range .Flashes}}<li class="urgent">{{.}}</li>{{end}}
@@ -108,8 +114,10 @@ form dd {
 		</div>
 		{{end}}
 		{{ else }}
+		{{if not .GenericEnabled}}
 		<p style="font-size: 1.3em; margin: 1rem 0;">Registration is currently closed.</p>
 		<p>You can always sign up on <a href="https://writefreely.org/instances">another instance</a>.</p>
+		{{end}}
 		{{ end }}
 	</div>
 </div>
