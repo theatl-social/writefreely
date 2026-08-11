@@ -41,7 +41,7 @@
 					{{ if and .SimpleNav (not .SingleUser) }}
 					{{if and (and .LocalTimeline .CanViewReader) .Chorus}}<a href="/"{{if eq .Path "/"}} class="selected"{{end}}>Home</a>{{end}}
 					{{ end }}
-					{{if or .Chorus (not .Username)}}<a href="/about"{{if eq .Path "/about"}} class="selected"{{end}}>About</a>{{end}}
+					{{if or .Chorus (not .Username)}}<a href="https://join.theatl.social/policies/overview">About</a>{{end}}
 					{{ if not .SingleUser }}
 						{{ if .Username }}
 					{{if or (not .Chorus) (gt .MaxBlogs 1)}}<a href="/me/c/"{{if eq .Path "/me/c/"}} class="selected"{{end}}>Blogs</a>{{end}}
