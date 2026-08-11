@@ -1,4 +1,4 @@
-GITREV=`git describe | cut -c 2-`
+GITREV=`git describe | cut -c 2-`-peachy
 LDFLAGS=-ldflags="-s -w -X 'github.com/writefreely/writefreely.softwareVer=$(GITREV)' -extldflags '-static'"
 BASELDFLAGS=-ldflags="-s -w -X 'github.com/writefreely/writefreely.softwareVer=$(GITREV)'"
 
