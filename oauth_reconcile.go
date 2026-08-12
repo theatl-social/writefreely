@@ -81,8 +81,14 @@ func setPendingReconciliation(app *App, w http.ResponseWriter, r *http.Request, 
 }
 
 // getAndClearPendingReconciliation reads back what setPendingReconciliation
-// stored, and immediately invalidates the cookie regardless of what the
-// caller does next -- this state is meant to be used exactly once.
+// stored, and tells the browser to forget the cookie regardless of what the
+// caller does next, so a normal follow-up visit won't find it again. This is
+// hygiene, not a security boundary: like any signed cookie, a copy captured
+// before this response would still decode successfully if replayed -- that's
+// fine here, since replaying it can only re-run the same idempotent
+// reconcile-and-check for the identity the access token already proves, the
+// same as attemptOAuthLogin's own "already linked" branch already handles
+// safely for a second real login attempt.
 func getAndClearPendingReconciliation(app *App, w http.ResponseWriter, r *http.Request) (*pendingReconciliation, error) {
 	session, err := app.sessionStore.Get(r, reconcileCookieName)
 	if err != nil {
