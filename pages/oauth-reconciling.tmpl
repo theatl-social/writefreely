@@ -1,0 +1,25 @@
+{{define "head"}}<title>Checking your membership &mdash; {{.SiteName}}</title>
+<meta http-equiv="refresh" content="2;url=/oauth/reconciling/finish">
+<style>
+.reconcile-spinner {
+	display: inline-block;
+	width: 1.1em;
+	height: 1.1em;
+	margin-right: 0.5em;
+	border: 0.15em solid rgba(0,0,0,0.15);
+	border-top-color: currentColor;
+	border-radius: 50%;
+	vertical-align: -0.2em;
+	animation: reconcile-spin 0.8s linear infinite;
+}
+@keyframes reconcile-spin {
+	to { transform: rotate(360deg); }
+}
+</style>
+{{end}}
+{{define "content"}}
+		<div class="content-container tight">
+			<h1><span class="reconcile-spinner" aria-hidden="true"></span>Wait just a moment&hellip;</h1>
+			<p>We're double-checking your theATL.social membership. This only takes a few seconds.</p>
+		</div>
+{{end}}

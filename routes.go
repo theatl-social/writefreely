@@ -87,6 +87,14 @@ func InitRoutes(apper Apper, r *mux.Router) *mux.Router {
 	configureGenericOauth(handler, write, apper.App())
 	configureGiteaOauth(handler, write, apper.App())
 
+	// theATL fork: reconciliation retry interstitial (oauth_reconcile.go).
+	// Registered once here rather than inside configureOauthRoutes (called
+	// once per configured provider above) since these two routes aren't
+	// provider-specific -- they only ever act on the pending-reconciliation
+	// state stashed by viewOauthCallback's "not eligible yet" branch.
+	write.HandleFunc("/oauth/reconciling", handler.OAuth(viewOauthReconciling)).Methods("GET")
+	write.HandleFunc("/oauth/reconciling/finish", handler.OAuth(viewOauthReconcilingFinish)).Methods("GET")
+
 	// Set up dynamic page handlers
 	// Handle auth
 	auth := write.PathPrefix("/api/auth/").Subrouter()

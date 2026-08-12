@@ -425,7 +425,7 @@ func TestViewOauthCallbackJITProvisioning(t *testing.T) {
 			assert.False(t, found, "preauth row must be consumed (deleted) once it provisions an account")
 		})
 
-		t.Run("no preauth row: refuses cleanly, creates nothing, never reaches signup", func(t *testing.T) {
+		t.Run("no preauth row: sends the user to reconcile-and-retry, creates nothing, never reaches signup", func(t *testing.T) {
 			const remoteUserID = "jit-22222"
 			const provider = "generic"
 			const clientID = "client-jit-2"
@@ -443,8 +443,20 @@ func TestViewOauthCallbackJITProvisioning(t *testing.T) {
 			assert.Error(t, err)
 			httpErr, ok := err.(impart.HTTPError)
 			assert.True(t, ok, "expected impart.HTTPError, got %T", err)
-			assert.Equal(t, http.StatusForbidden, httpErr.Status)
-			assert.NotEmpty(t, httpErr.Message)
+			// Not eligible on this first attempt: rather than the old immediate
+			// 403, the callback now redirects to the reconciliation-retry
+			// interstitial and stashes this identity to retry, instead of
+			// failing outright. See oauth_reconcile.go.
+			assert.Equal(t, http.StatusFound, httpErr.Status)
+			assert.Equal(t, "/oauth/reconciling", httpErr.Message)
+
+			var sawPendingReconcileCookie bool
+			for _, c := range rr.Result().Cookies() {
+				if c.Name == reconcileCookieName {
+					sawPendingReconcileCookie = true
+				}
+			}
+			assert.True(t, sawPendingReconcileCookie, "expected the pending-reconciliation cookie to be set so the retry can find this identity again")
 
 			localUserID, err := ds.GetIDForRemoteUser(context.Background(), remoteUserID, provider, clientID)
 			assert.NoError(t, err)
@@ -674,8 +686,11 @@ func oauthTestMockRoundTrip(remoteUserID, username string) *MockHTTPClient {
 // their membership before ever logging in kept a permanently valid grant.
 // This proves the fix closes that gap end-to-end: revoke, then attempt to
 // actually use the (now-nonexistent) grant, and confirm it's refused exactly
-// like an identity that was never preauthorized at all -- 403, no account,
-// no oauth_users link.
+// like an identity that was never preauthorized at all -- sent to the
+// reconcile-and-retry interstitial rather than logged in, no account, no
+// oauth_users link. (Not a final 403: see
+// TestViewOauthCallbackJITProvisioning's "no preauth row" case for that --
+// this test's login attempt is a single try, not the full retry sequence.)
 func TestOauthPreauthRevokeThenLoginRefuses(t *testing.T) {
 	if !runMySQLTests() {
 		t.Skip("skipping mysql tests")
@@ -750,7 +765,8 @@ func TestOauthPreauthRevokeThenLoginRefuses(t *testing.T) {
 		require.Error(t, err)
 		httpErr, ok := err.(impart.HTTPError)
 		require.True(t, ok, "expected impart.HTTPError, got %T", err)
-		assert.Equal(t, http.StatusForbidden, httpErr.Status)
+		assert.Equal(t, http.StatusFound, httpErr.Status)
+		assert.Equal(t, "/oauth/reconciling", httpErr.Message)
 
 		localUserID, err := ds.GetIDForRemoteUser(context.Background(), remoteUserID, provider, clientID)
 		require.NoError(t, err)

@@ -29,7 +29,6 @@ import (
 	"github.com/gorilla/sessions"
 	"github.com/writeas/impart"
 	"github.com/writeas/web-core/log"
-	"github.com/writefreely/writefreely/author"
 	"github.com/writefreely/writefreely/config"
 )
 
@@ -422,161 +421,39 @@ func (h oauthHandler) viewOauthCallback(app *App, w http.ResponseWriter, r *http
 	// theATL fork: just-in-time provisioning. If this Mastodon identity has a
 	// pending pre-authorization (pushed by the member site in advance), create
 	// the account now instead of falling through to the manual signup page.
-	// GetOauthPreauth/SetUserMaxBlogs/DeleteOauthPreauth/GetUserForAuth are
-	// defined only on the concrete *datastore (oauth_preauth.go, database.go),
-	// not on the h.DB field's narrower OAuthDatastore interface above, so they
-	// are reached via app.db here -- the same way the existing
-	// app.db.GetUserInvite call a few lines below already does.
-	// withOauthIdentityLock (oauth_preauth.go) takes the whole *App, not just
-	// app.db: it needs both app.db.driverName and the separate app.oauthLockDB
-	// pool its advisory lock pins a connection from (see that function's doc
-	// comment for why those two pools must stay separate). See FORK.md and the
-	// design spec's "Revision 2 — OAuth JIT Provisioning".
-	//
-	// Everything from the re-check below through the preauth delete runs
-	// inside withOauthIdentityLock, keyed on this exact identity
-	// (tokenInfo.UserID, provider, clientID). Without it, this JIT path and
-	// handleSetMastodonUserMaxBlogs's check-then-write (oauth_preauth.go) can
-	// interleave: an allowance push can observe "not linked" (via
-	// GetIDForRemoteUser, same as the check at the top of this function) while
-	// a login for the same identity is concurrently creating the account,
-	// silently losing the push (200 OK, but the account keeps its OLD
-	// allowance) and resurrecting a preauth row against an identity that is
-	// now already provisioned -- see withOauthIdentityLock's doc comment
-	// (oauth_preauth.go) for the full race and why a plain transaction alone
-	// can't close it.
-	var jitHandled bool
-	lockErr := withOauthIdentityLock(ctx, app, tokenInfo.UserID, provider, clientID, func() error {
-		// Re-check linkage inside the lock: the GetIDForRemoteUser call above
-		// (before this lock was acquired) can be stale by the time we get
-		// here -- e.g. two near-simultaneous logins for the same Mastodon
-		// identity, or this login racing handleSetMastodonUserMaxBlogs, which
-		// takes this same per-identity lock before its own linked/not-linked
-		// branch. If someone else won that race and linked this identity
-		// while we waited for the lock, recover by logging the now-existing
-		// account in rather than creating a second, differently-suffixed
-		// duplicate.
-		relinkedID, err := h.DB.GetIDForRemoteUser(ctx, tokenInfo.UserID, provider, clientID)
-		if err != nil {
-			log.Error("Unable to GetIDForRemoteUser: %s", err)
-			return err
-		}
-		if relinkedID != -1 {
-			jitHandled = true
-			user, err := h.DB.GetUserByID(relinkedID)
-			if err != nil {
-				log.Error("Unable to GetUserByID %d: %s", relinkedID, err)
-				return err
-			}
-			if err := loginOrFail(h.Store, w, r, user); err != nil {
-				log.Error("Unable to loginOrFail %d: %s", user.ID, err)
-				return err
-			}
-			return nil
-		}
-
-		maxBlogs, eligible, err := app.db.GetOauthPreauth(tokenInfo.UserID, provider, clientID)
-		if err != nil {
-			return err
-		}
-		if !eligible {
-			return nil
-		}
-		jitHandled = true
-
-		// CreateUser enforces uniqueness of this string against THREE tables,
-		// not just users.username: collections.alias (INSERT INTO collections,
-		// database.go ~line 248, rolls back and returns 409 on collision) and
-		// posts.id via PostIDExists (database.go ~line 215, checked up front,
-		// also 409). taken() must cover all three, or a collision against a
-		// collection alias or post ID that GetUserForAuth alone can't see
-		// reports "available" when it isn't -- normalizeOauthUsername never
-		// tries its suffixed fallback, and every retry then hits the identical
-		// collision, locking that member out permanently.
-		//
-		// taken() must ALSO cover validity, not just uniqueness: every other
-		// account-creation path in this codebase (account.go, app.go,
-		// collections.go, database.go) gates on author.IsValidUsername, which
-		// rejects both too-short names and a reserved-word list ("admin",
-		// "login", "user", ...) that nothing in WriteFreely's own uniqueness
-		// tables would ever flag as occupied. Without this, the JIT path could
-		// hand a real Mastodon member a reserved/impersonation-prone username
-		// (e.g. "admin") purely because no WriteFreely account happened to be
-		// sitting on it yet. Treating "invalid" the same as "taken" here makes
-		// normalizeOauthUsername's existing suffix-fallback tiers route around
-		// it automatically -- no separate reserved-word logic needed there.
-		username := normalizeOauthUsername(tokenInfo.Username, tokenInfo.UserID, func(u string) bool {
-			if !author.IsValidUsername(h.Config, u) {
-				return true
-			}
-			if _, err := app.db.GetUserForAuth(u); err == nil {
-				return true
-			}
-			if _, err := app.db.GetCollection(u); err == nil {
-				return true
-			}
-			return app.db.PostIDExists(u)
-		})
-
-		newUser := &User{
-			Username: username,
-			// No password: this account is only ever reachable via OAuth login.
-			// CreateUser's INSERT writes u.HashedPass directly into a NOT NULL
-			// column, so this must be a non-nil empty slice, not the zero value
-			// -- the same convention oauth_signup.go uses when no password is
-			// submitted (hashedPass := []byte{}).
-			HashedPass: []byte{},
-			Created:    time.Now().Truncate(time.Second).UTC(),
-		}
-		if err := h.DB.CreateUser(h.Config, newUser, tokenInfo.DisplayName, ""); err != nil {
-			log.Error("oauth JIT: CreateUser failed for %q (remote user %s, provider %s, client %s): %v", username, tokenInfo.UserID, provider, clientID, err)
-			return err
-		}
-		if err := app.db.SetUserMaxBlogs(newUser.Username, maxBlogs); err != nil {
-			log.Error("oauth JIT: created user %q but failed to set max_blogs: %v", newUser.Username, err)
-			// Do not fail the login over this -- the user account exists and is
-			// usable; worst case they fall back to the instance default limit
-			// until the next allowance push or the nightly audit corrects it.
-		}
-		if err := h.DB.RecordRemoteUserID(r.Context(), newUser.ID, tokenInfo.UserID, provider, clientID, tokenResponse.AccessToken); err != nil {
-			// CreateUser has already committed users/collections rows at this
-			// point -- this is a partial failure, not a clean rollback. The
-			// account now exists but is unlinked, and normalizeOauthUsername's
-			// idempotency guarantee does NOT cover this case (see the caveat on
-			// its doc comment in oauth_preauth.go): a retry will see this
-			// username as taken and provision a SECOND, differently-named
-			// account rather than completing this one. Log loudly so this is
-			// discoverable and manually fixable rather than a silent 500.
-			log.Error("oauth JIT: created user id=%d username=%q but FAILED to link remote user %s (provider %s, client %s): %v -- this account is orphaned and needs manual reconciliation", newUser.ID, newUser.Username, tokenInfo.UserID, provider, clientID, err)
-			return err
-		}
-		if err := app.db.DeleteOauthPreauth(tokenInfo.UserID, provider, clientID); err != nil {
-			log.Error("oauth JIT: provisioned user %q but failed to delete preauth row: %v", newUser.Username, err)
-		}
-
-		if err := loginOrFail(h.Store, w, r, newUser); err != nil {
-			log.Error("Unable to loginOrFail %d: %s", newUser.ID, err)
-			return err
-		}
-		return nil
-	})
-	if lockErr != nil {
-		return impart.HTTPError{http.StatusInternalServerError, lockErr.Error()}
+	// See attemptOAuthLogin's doc comment (oauth_reconcile.go) for the
+	// concurrency-safety details (withOauthIdentityLock, the race with
+	// handleSetMastodonUserMaxBlogs) -- extracted there so this same
+	// check-and-provision logic can also run from the reconciliation retry
+	// path below, without duplicating it.
+	handled, err := attemptOAuthLogin(ctx, app, w, r, tokenInfo.UserID, tokenInfo.Username, tokenInfo.DisplayName, provider, clientID, tokenResponse.AccessToken)
+	if err != nil {
+		return impart.HTTPError{http.StatusInternalServerError, err.Error()}
 	}
-	if jitHandled {
+	if handled {
 		return nil
 	}
 
-	// Not eligible: no account is created. This must NOT fall through to
-	// showOauthSignupPage -- the OAuth path's only door is the preauth check
-	// above, enforced unconditionally in code. (In-app self-serve signup is a
-	// separate story per route: POST /api/auth/signup IS gated by
-	// open_registration at route-registration time, but POST /auth/signup is
-	// registered unconditionally and its open_registration check is bypassed
-	// by any non-empty invite_code -- so in practice it is blocked only by a
-	// HAProxy ACL outside this repo. See FORK.md's "Known limits". That infra
-	// dependency has no bearing on this OAuth code path.)
-	return impart.HTTPError{http.StatusForbidden, "This Mastodon account is not currently linked to an active theATL.social membership. If you believe this is an error, check your membership status at members.theatl.social."}
+	// Not eligible on this first attempt: rather than fail immediately, give
+	// the member site a chance to catch up before giving the user a hard
+	// error. This Mastodon identity is now spent as far as the OAuth `code`
+	// goes (single-use, already exchanged above), so a real retry can't just
+	// replay this URL -- stash the minimum needed to retry this exact
+	// identity and send the user to a short "we're checking" interstitial
+	// instead of today's raw error. See oauth_reconcile.go and the
+	// 2026-08-12-writefreely-preauth-gap incident this closes the loop on.
+	if err := setPendingReconciliation(app, w, r, pendingReconciliation{
+		RemoteUserID: tokenInfo.UserID,
+		Username:     tokenInfo.Username,
+		DisplayName:  tokenInfo.DisplayName,
+		Provider:     provider,
+		ClientID:     clientID,
+		AccessToken:  tokenResponse.AccessToken,
+	}); err != nil {
+		log.Error("oauth reconcile: failed to store pending state, falling back to immediate error: %v", err)
+		return impart.HTTPError{http.StatusForbidden, "This Mastodon account is not currently linked to an active theATL.social membership. If you believe this is an error, check your membership status at members.theatl.social."}
+	}
+	return impart.HTTPError{http.StatusFound, "/oauth/reconciling"}
 
 	// New user registration below.
 	// First, verify that user is allowed to register
