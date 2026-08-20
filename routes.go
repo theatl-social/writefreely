@@ -98,12 +98,6 @@ func InitRoutes(apper Apper, r *mux.Router) *mux.Router {
 	// Set up dynamic page handlers
 	// Handle auth
 	auth := write.PathPrefix("/api/auth/").Subrouter()
-	// theATL fork: always register /signup, even when OpenRegistration is
-	// false at boot. Previously this route was only wired up when
-	// registration was open at startup, so an admin toggling registration
-	// closed later left the route live with no invite check at all. The
-	// gate now lives in signup() itself (account.go), which is the correct
-	// place for it since it's re-evaluated per-request.
 	auth.HandleFunc("/signup", handler.All(apiSignup)).Methods("POST")
 	auth.HandleFunc("/login", handler.All(login)).Methods("POST")
 	auth.HandleFunc("/read", handler.WebErrors(handleWebCollectionUnlock, UserLevelNone)).Methods("POST")
