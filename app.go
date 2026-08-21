@@ -281,15 +281,13 @@ func handleViewHome(app *App, w http.ResponseWriter, r *http.Request) error {
 
 		// theATL fork: show the discovery feed (home.go) at / for everyone,
 		// rather than the landing page for anonymous visitors and the editor
-		// for members. Guarded the same way the Chorus branch above is, so a
-		// private instance still falls through to the login redirect below.
+		// for members. This replaces the handleViewPad branch that used to sit
+		// directly below -- logged-in members land on the feed now, and the
+		// editor has a permanent home at /new in the nav. Guarded the same way
+		// the Chorus branch above is, so a private instance still falls through
+		// to the login redirect below.
 		if !app.cfg.App.Private || u != nil {
 			return viewHome(app, w, r)
-		}
-
-		if u != nil {
-			// User is logged in, so show the Pad
-			return handleViewPad(app, w, r)
 		}
 
 		if app.cfg.App.Private {
