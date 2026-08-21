@@ -38,25 +38,29 @@
 				</nav>
 				{{end}}
 				<nav class="tabs">
-					{{ if and .SimpleNav (not .SingleUser) }}
-					{{if and (and .LocalTimeline .CanViewReader) .Chorus}}<a href="/"{{if eq .Path "/"}} class="selected"{{end}}>Home</a>{{end}}
-					{{ end }}
+					{{/* theATL fork: / is the discovery feed for everyone now (home.go), not just in Chorus mode, and SimpleNav is never on for this instance, so the Home link no longer lives inside the SimpleNav-only wrapper it used to share with .Chorus. */}}
+					{{if and .LocalTimeline .CanViewReader}}<a href="/"{{if eq .Path "/"}} class="selected"{{end}}>Home</a>{{end}}
 					{{if or .Chorus (not .Username)}}<a href="https://join.theatl.social/policies/overview">About</a>{{end}}
 					{{ if not .SingleUser }}
 						{{ if .Username }}
-					{{if or (not .Chorus) (gt .MaxBlogs 1)}}<a href="/me/c/"{{if eq .Path "/me/c/"}} class="selected"{{end}}>Blogs</a>{{end}}
+					{{/* theATL fork: renamed from "Blogs" -- that label now belongs to the instance directory link below, so this (the member's own blogs) needs to read differently. */}}
+					{{if or (not .Chorus) (gt .MaxBlogs 1)}}<a href="/me/c/"{{if eq .Path "/me/c/"}} class="selected"{{end}}>My blogs</a>{{end}}
 					{{if and (and .Chorus (eq .MaxBlogs 1)) .Username}}<a href="/{{.Username}}/"{{if eq .Path (printf "/%s/" .Username)}} class="selected"{{end}}>My Posts</a>{{end}}
 					{{if not .DisableDrafts}}<a href="/me/posts/"{{if eq .Path "/me/posts/"}} class="selected"{{end}}>Drafts</a>{{end}}
 						{{ end }}
 					{{if and (and  .LocalTimeline .CanViewReader) (not .Chorus)}}<a href="/read"{{if eq .Path "/read"}} class="selected"{{end}}>Reader</a>{{end}}
+					{{/* theATL fork: the instance blog directory (home.go, /blogs). Placed next to Reader so the discovery links sit together. */}}
+					{{if and .LocalTimeline .CanViewReader}}<a href="/blogs"{{if eq .Path "/blogs"}} class="selected"{{end}}>Blogs</a>{{end}}
 					{{if eq .SignupPath "/signup"}}<a href="/signup"{{if eq .Path "/signup"}} class="selected"{{end}}>Sign up</a>{{end}}
 					{{if and (not .Username) (not .Private)}}<a href="/login"{{if eq .Path "/login"}} class="selected"{{end}}>Log in</a>{{else if .SimpleNav}}<a href="/me/logout">Log out</a>{{end}}
 					{{ end }}
 				</nav>
-				{{if .Chorus}}{{if .Username}}<div class="right-side" style="font-size: 0.86em;">
-							<a class="simple-btn" href="/new">New Post</a>
+				{{/* theATL fork: / is the feed now, not the editor landing page, so members need a permanent way to reach /new. This div must stay outside the .Chorus block below -- that block also closes a <nav> tag that only balances when Chorus is true, and Chorus is always false on this instance. */}}
+				{{if .Username}}<div class="right-side" style="font-size: 0.86em;">
+							<a class="simple-btn" href="/new">Write</a>
 						</div>{{end}}
-					</nav>
+				{{if .Chorus}}
+						</nav>
 				{{end}}
 			</nav>
 			{{end}}

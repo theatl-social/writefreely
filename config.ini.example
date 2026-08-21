@@ -50,6 +50,11 @@ min_username_len  = 3
 max_blogs         = 1
 federation        = true
 local_timeline    = true
+# theATL fork: new blogs are created public so they appear in the / feed and
+# the /blogs directory. Without this, defaultVisibility() (collections.go)
+# falls through to unlisted and every new blog is invisible to both.
+# Existing blogs are NOT changed by this; their owners opt in themselves.
+default_visibility = public
 private           = false
 user_invites      =
 disable_password_auth = false
