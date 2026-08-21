@@ -279,24 +279,31 @@ func handleViewHome(app *App, w http.ResponseWriter, r *http.Request) error {
 			}
 		}
 
-		// theATL fork: show the discovery feed (home.go) at / for everyone,
-		// rather than the landing page for anonymous visitors and the editor
-		// for members. This replaces the handleViewPad branch that used to sit
-		// directly below -- logged-in members land on the feed now, and the
-		// editor has a permanent home at /new in the nav. Guarded the same way
-		// the Chorus branch above is, so a private instance still falls through
-		// to the login redirect below.
-		if !app.cfg.App.Private || u != nil {
-			return viewHome(app, w, r)
-		}
-
-		if app.cfg.App.Private {
+		// theATL fork: on a private instance, only an anonymous visitor gets
+		// bounced to login -- a logged-in user falls through to the feed
+		// below instead of the editor. This is `&& u == nil` added to what
+		// was originally an unconditional `if app.cfg.App.Private`; that
+		// unconditional form used to matter because the very next thing an
+		// anonymous OR logged-in user could reach was the Pad, but the Pad
+		// branch (and its `if u != nil` guard) is gone now that everyone
+		// lands on the feed, so this check has to carry the distinction on
+		// its own.
+		if app.cfg.App.Private && u == nil {
 			return viewLogin(app, w, r)
 		}
 
 		if land := app.cfg.App.LandingPath(); land != "/" {
-			return impart.HTTPError{http.StatusFound, land}
+			return impart.HTTPError{Status: http.StatusFound, Message: land}
 		}
+
+		// theATL fork: show the discovery feed (home.go) at / for everyone,
+		// rather than the landing page for anonymous visitors and the editor
+		// for members. This replaces the handleViewPad branch that used to
+		// sit here -- logged-in members land on the feed now, and the editor
+		// has a permanent home at /new in the nav. By this point forceLanding,
+		// SingleUser, private-and-anonymous, and a configured landing path
+		// have all already returned, so / unconditionally means the feed.
+		return viewHome(app, w, r)
 	}
 
 	return handleViewLanding(app, w, r)
