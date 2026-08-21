@@ -1,0 +1,38 @@
+{{define "head"}}<title>Blogs on {{.SiteName}}</title>
+		<meta name="description" content="Every public blog on {{.SiteName}}.">
+		<style>
+		#blogs-wrap { max-width: 40rem; margin: 0 auto; padding: 0 1rem; }
+		#blogs-wrap h1 { font-weight: 300; text-align: center; margin: 2em 0 1.5em; }
+		#blogs-wrap ul { list-style: none; padding: 0; }
+		#blogs-wrap li { margin: 0 0 2em; }
+		#blogs-wrap .blog-title { font-size: 1.1em; font-weight: 500; }
+		#blogs-wrap .blog-meta { color: #777; font-size: 0.86em; }
+		</style>
+{{end}}
+{{define "content"}}
+<div id="blogs-wrap">
+	<h1>Blogs on {{.SiteName}}</h1>
+
+	{{if gt (len .Blogs) 0}}
+	<ul>
+		{{range .Blogs}}<li>
+			<a class="blog-title" href="{{.CanonicalURL}}">{{.DisplayTitle}}</a>
+			{{if .Description}}<div class="blog-desc">{{.Description}}</div>{{end}}
+			<div class="blog-meta">{{.PostCount}} {{pluralize "post" "posts" .PostCount}}</div>
+		</li>{{end}}
+	</ul>
+
+	{{if gt .TotalPages 1}}<nav id="paging" class="content-container clearfix">
+		{{if gt .CurrentPage 1}}<a href="{{.PrevPageURL .CurrentPage}}">&#8672; Newer</a>{{end}}
+		{{if lt .CurrentPage .TotalPages}}<a style="float:right;" href="{{.NextPageURL .CurrentPage}}">Older &#8674;</a>{{end}}
+	</nav>{{end}}
+
+	{{else}}
+	<div class="attention-box">
+		<p>No public blogs yet.</p>
+		<p>Blogs are listed here once their owner sets them to <strong>public</strong> in
+		<a href="/me/c/">blog settings</a>.</p>
+	</div>
+	{{end}}
+</div>
+{{end}}

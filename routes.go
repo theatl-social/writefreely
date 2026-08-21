@@ -212,6 +212,14 @@ func InitRoutes(apper Apper, r *mux.Router) *mux.Router {
 	write.HandleFunc("/read", handler.Web(viewLocalTimeline, UserLevelReader))
 	RouteRead(handler, UserLevelReader, write.PathPrefix("/read").Subrouter())
 
+	// theATL fork: the instance blog directory (home.go). Registered here,
+	// with the other special pages, because the /{collection} and /{post}
+	// catch-alls further down would otherwise swallow /blogs. "blog" and
+	// "blogs" are reserved in author/author.go so no collection can claim
+	// the alias.
+	write.HandleFunc("/blogs", handler.Web(viewBlogsDirectory, UserLevelReader))
+	write.HandleFunc("/blogs/p/{page:[0-9]+}", handler.Web(viewBlogsDirectory, UserLevelReader))
+
 	draftEditPrefix := ""
 	if apper.App().cfg.App.SingleUser {
 		draftEditPrefix = "/d"

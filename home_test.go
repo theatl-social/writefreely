@@ -7,12 +7,14 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/gorilla/mux"
 	"github.com/gorilla/sessions"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/writeas/impart"
 	"github.com/writeas/web-core/memo"
 	"github.com/writefreely/writefreely/config"
+	"github.com/writefreely/writefreely/key"
 )
 
 // seedBlog inserts a user, a collection, and n posts, and returns the
@@ -388,4 +390,53 @@ func TestHandleViewHomeStillHonoursLandingPath(t *testing.T) {
 	require.True(t, ok, "a configured landing path must be returned as an impart.HTTPError redirect, got %T: %v", err, err)
 	assert.Equal(t, http.StatusFound, httpErr.Status)
 	assert.Equal(t, "/read", httpErr.Message)
+}
+
+func TestBlogsDirectoryPaginates(t *testing.T) {
+	app := homeTestApp(t)
+
+	blogs := make([]HomeBlog, blogsPerPage+3)
+	for i := range blogs {
+		blogs[i].Alias = "b"
+		blogs[i].hostName = app.cfg.App.Host
+	}
+	app.homeFeed.blogs = &blogs
+
+	first := blogsPageData(app, httptest.NewRequest("GET", "/blogs", nil), 1)
+	assert.Len(t, *first.Blogs, blogsPerPage, "page 1 is full")
+	assert.Equal(t, 2, first.TotalPages)
+
+	second := blogsPageData(app, httptest.NewRequest("GET", "/blogs/p/2", nil), 2)
+	assert.Len(t, *second.Blogs, 3, "page 2 holds the remainder, not a full page")
+
+	// A page past the end must not panic or over-slice.
+	require.NotPanics(t, func() {
+		beyond := blogsPageData(app, httptest.NewRequest("GET", "/blogs/p/99", nil), 99)
+		assert.Len(t, *beyond.Blogs, 0)
+	})
+}
+
+// The /{collection} catch-all at routes.go:230-232 will swallow /blogs unless
+// the directory is registered ahead of it.
+func TestBlogsRouteBeatsTheCollectionCatchAll(t *testing.T) {
+	cfg := config.New()
+	cfg.App.SingleUser = false
+	cfg.App.LocalTimeline = true
+	cfg.App.Host = "https://write.example.test"
+
+	app := &App{
+		cfg:  cfg,
+		keys: &key.Keychain{CSRFKey: []byte("0123456789abcdef0123456789abcdef")},
+	}
+
+	router := mux.NewRouter()
+	InitRoutes(app, router)
+
+	var match mux.RouteMatch
+	require.True(t, router.Match(httptest.NewRequest("GET", "/blogs", nil), &match),
+		"/blogs must match a registered route")
+	assert.Empty(t, match.Vars["collection"],
+		"/blogs must not be captured as a collection alias")
+	assert.Empty(t, match.Vars["post"],
+		"/blogs must not fall through to the /{post} catch-all at routes.go:235")
 }

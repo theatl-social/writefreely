@@ -11,9 +11,13 @@
 package writefreely
 
 import (
+	"fmt"
+	"math"
 	"net/http"
+	"strconv"
 	"time"
 
+	"github.com/gorilla/mux"
 	"github.com/writeas/impart"
 	"github.com/writeas/web-core/log"
 	"github.com/writeas/web-core/memo"
@@ -190,6 +194,82 @@ func viewHome(app *App, w http.ResponseWriter, r *http.Request) error {
 
 	if err := templates["home"].ExecuteTemplate(w, "base", homePageData(app, r)); err != nil {
 		log.Error("Unable to render home: %v", err)
+		return impart.HTTPError{Status: http.StatusInternalServerError, Message: "Couldn't render page."}
+	}
+	return nil
+}
+
+// blogsPage is the data the /blogs directory renders from.
+type blogsPage struct {
+	page.StaticPage
+	Blogs       *[]HomeBlog
+	CurrentPage int
+	TotalPages  int
+}
+
+func (b *blogsPage) NextPageURL(n int) string { return fmt.Sprintf("/blogs/p/%d", n+1) }
+
+func (b *blogsPage) PrevPageURL(n int) string {
+	if n == 2 {
+		return "/blogs"
+	}
+	return fmt.Sprintf("/blogs/p/%d", n-1)
+}
+
+// blogsPageData assembles one page of the directory. Pages past the end
+// return an empty slice rather than an error: the directory shrinks whenever
+// a blog goes unlisted, so a bookmarked deep page is expected, not a fault.
+func blogsPageData(app *App, r *http.Request, pageNum int) *blogsPage {
+	updateHomeBlogsCache(app, false)
+
+	all := []HomeBlog{}
+	if app.homeFeed != nil && app.homeFeed.blogs != nil {
+		all = *app.homeFeed.blogs
+	}
+
+	totalPages := int(math.Ceil(float64(len(all)) / float64(blogsPerPage)))
+	if totalPages < 1 {
+		totalPages = 1
+	}
+	if pageNum < 1 {
+		pageNum = 1
+	}
+
+	start := blogsPerPage * (pageNum - 1)
+	if start > len(all) {
+		start = len(all)
+	}
+	end := start + blogsPerPage
+	if end > len(all) {
+		end = len(all)
+	}
+	blogs := all[start:end]
+
+	d := &blogsPage{
+		StaticPage:  pageForReq(app, r),
+		Blogs:       &blogs,
+		CurrentPage: pageNum,
+		TotalPages:  totalPages,
+	}
+	u := getUserSession(app, r)
+	d.IsAdmin = u != nil && u.IsAdmin()
+	d.CanInvite = canUserInvite(app.cfg, d.IsAdmin)
+	return d
+}
+
+// viewBlogsDirectory renders the full list of public blogs at /blogs.
+func viewBlogsDirectory(app *App, w http.ResponseWriter, r *http.Request) error {
+	if !app.cfg.App.LocalTimeline {
+		return impart.HTTPError{Status: http.StatusNotFound, Message: "Page doesn't exist."}
+	}
+
+	pageNum := 1
+	if p, err := strconv.Atoi(mux.Vars(r)["page"]); err == nil && p > 0 {
+		pageNum = p
+	}
+
+	if err := templates["blogs"].ExecuteTemplate(w, "base", blogsPageData(app, r, pageNum)); err != nil {
+		log.Error("Unable to render blogs directory: %v", err)
 		return impart.HTTPError{Status: http.StatusInternalServerError, Message: "Couldn't render page."}
 	}
 	return nil
