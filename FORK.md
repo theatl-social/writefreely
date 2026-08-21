@@ -49,6 +49,54 @@ Everything else is upstream. Both internal endpoints require the
 `WRITEFREELY_API_SECRET` environment variable (32+ characters) in an
 `X-WriteFreely-Secret` header, and are additionally blocked at our reverse proxy.
 
+**Instance discovery feed.** Upstream shows a marketing landing page to
+anonymous visitors at `/` and the editor to logged-in ones, and has no page
+anywhere that lists the blogs an instance hosts. This fork serves a discovery
+digest at `/` for everyone — recent posts beside recently-active blogs — with
+a full blog directory behind it.
+
+| Change | Location |
+|---|---|
+| `/` renders the digest for anonymous and logged-in visitors alike, instead of the landing page and the editor respectively | `app.go` `handleViewHome` |
+| Digest handler, `/blogs` directory handler, the active-blogs query, and its cache | `home.go` |
+| `homeFeed` cache field and its init, sharing `initLocalTimeline`'s `local_timeline` guard because the feed reads `app.timeline` for its posts | `app.go` `App.homeFeed`, `Initialize` |
+| `/blogs` and `/blogs/p/{page}` registered with the special pages, ahead of the `/{collection}` and `/{post}` catch-alls that would otherwise swallow them | `routes.go` |
+| `blog` and `blogs` reserved so no collection can claim an alias that collides with the directory route | `author/author.go` `reservedUsernames` |
+| Home / Blogs nav links un-gated from Chorus mode; the existing `/me/c/` link renamed to "My blogs"; a permanent Write button, since `/` is no longer where members land | `templates/base.tmpl` |
+| `default_visibility = public`, so new blogs are not created invisible to the feed and the directory | `config.ini.example` (see the deployment prerequisite below — production's `config.ini` is untracked and needs the same edit by hand) |
+
+Recent posts reuse `app.timeline` — the `memo.Memo` that already backs `/read`
+— rather than adding a second post query, so the page adds no per-request
+database load and inherits upstream's per-author fairness cap. Only the
+active-blogs aggregate is new.
+
+One behaviour change falls out of where the feed sits in `handleViewHome`:
+with a `landing` path configured (`App.LandingPath()`), a **logged-in** user
+now gets that redirect too. Upstream only ever sent an anonymous visitor to
+the landing path and always gave a logged-in user the Pad; the Pad branch
+that used to sit after the landing-path check is gone, and the feed now
+occupies that same spot, so the landing-path check runs — and can redirect —
+before either kind of visitor reaches it. Defensible, since the operator
+configured `/` to redirect, full stop, but it is a real semantic change from
+upstream and worth knowing before assuming `landing` only ever affects
+anonymous traffic.
+
+### Deployment prerequisite: `default_visibility` does not get set by merging this branch
+
+`config.ini` is untracked (`.gitignore` has `*.ini`) — only
+`config.ini.example` ships in this repo. Production reads `/data/config.ini`,
+bind-mounted from `./data` on the host (`docker-compose.prod.yml`).
+**Merging this branch to `theatl-main` and redeploying does not change
+production's `default_visibility`.** Someone has to hand-edit the production
+`config.ini` to add `default_visibility = public` and restart the container.
+
+Miss this and nothing looks broken: the app runs, existing blogs work,
+nothing errors or logs a warning. New blogs just keep defaulting to
+unlisted, so the feed and `/blogs` stay permanently empty — the feature is
+fully implemented and completely invisible. Check this by hand on every
+deploy that includes this branch; there is no code-level way to detect a
+missing config edit.
+
 ## Why the schema change avoids the migration system
 
 `migrations/migrations.go` registers migrations in a flat ordered slice where
@@ -59,18 +107,33 @@ the merge surface entirely.
 
 ## Merge policy
 
-Only `app.go`, `account.go`, `collections.go`, `routes.go`, `posts.go`, and
-`oauth.go` are modified, by one line or a short block each, all marked with
-`theATL fork:` comments. Merge upstream releases onto `theatl-main`; conflicts
-should be confined to those six files.
+Only `app.go`, `account.go`, `collections.go`, `routes.go`, `posts.go`,
+`oauth.go`, and `author/author.go` are modified, by one line or a short block
+each, all marked with `theATL fork:` comments. Merge upstream releases onto
+`theatl-main`; conflicts should be confined to those seven files.
+`author/author.go` is the seventh, added by the discovery feed to reserve
+`blog`/`blogs` in `reservedUsernames` so no collection can claim an alias
+that collides with the `/blogs` route — a two-entry addition to a static map
+that upstream changes rarely; the alternative was a permanently worse URL.
+
+`templates/base.tmpl` is also fork-modified — this feature's nav changes
+land there too (see the table above) — but it is not a Go file, so it sits
+outside the seven-file budget above by definition, not as an exception to
+it. It was already carrying unrelated fork edits before this feature (e.g.
+the footer version-link fix), so this is not the first time it has diverged
+from upstream, and conflicts there are still worth checking on every merge.
 
 Wholly new, fork-owned files — `maxblogs.go`, `maxblogs_api.go`,
-`oauth_preauth.go`, and their `_test.go` counterparts — carry their own full
-copyright header instead of a `theATL fork:` comment on an upstream line, and
-are not part of this budget: there is no upstream version of them to conflict
-with. `oauth_signup.go` is unmodified upstream code left in place but
-unrouted (see the "What diverges" table above) — also not on this budget,
-since nothing in it was changed.
+`oauth_preauth.go`, and `home.go` — carry their own full copyright header
+instead of a `theATL fork:` comment on an upstream line, and are not part of
+this budget: there is no upstream version of them to conflict with. Their
+`_test.go` counterparts (`maxblogs_test.go`, `oauth_preauth_test.go`,
+`home_test.go`) do NOT carry that header — non-test fork-owned files carry
+it, their `_test.go` counterparts don't — and are likewise outside this
+budget, for the same reason: no upstream version exists to conflict with.
+`oauth_signup.go` is unmodified upstream code left in place but unrouted
+(see the "What diverges" table above) — also not on this budget, since
+nothing in it was changed.
 
 Three extra steps, each earned by something that already bit us or nearly did:
 
@@ -83,7 +146,7 @@ Three extra steps, each earned by something that already bit us or nearly did:
   (gated at the handler), and `CreateCollectionFromToken` (`database.go:290`,
   zero callers). If upstream wires the third to a route, the cap silently gains
   a hole and `database.go` is off our budget.
-- **Bump the AGPL §5(a) notice count** — it is six files now.
+- **Bump the AGPL §5(a) notice count** — it is seven files now.
 
 ## Known upstream test failures
 
@@ -218,3 +281,37 @@ total from this process, plus whatever else shares that server. Fine at this
 deployment's scale (one community instance behind one reverse proxy, not
 internet-scale traffic); re-check MariaDB's `max_connections` and what else
 contends for it before raising either number.
+
+**The discovery feed is eventually consistent, by up to 10 minutes.** Both
+`/` and `/blogs` read memoized caches on `tlCacheDur` (`read.go`), so a newly
+published post, or a blog just flipped to public, does not appear until the
+memo expires. This is what keeps the pages free of per-request database load,
+and it matches `/read`'s long-standing behaviour — but it reads as a bug to a
+member who publishes and immediately refreshes the home page. Say so in
+member-facing docs rather than shortening the TTL.
+
+**The active-blogs query does a full scan and filesort.** `posts` has no index
+on `created` (`schema.sql`), and the query groups by `collection_id` while
+ordering on `MAX(p.created)`. Accepted as-is: it is identical in kind to
+`FetchPublicPosts` (`read.go`), which has scanned and filesorted the same
+table every 10 minutes since long before this fork, and it sits behind the
+same memo. Revisit — with an index on `posts(collection_id, created)` — if the
+post count grows by an order of magnitude or the TTL is shortened.
+
+**Flipping `default_visibility` does not migrate existing blogs.** New blogs
+are created public and therefore listed; every blog created before this change
+is unlisted and stays out of the feed and the directory until its owner opts
+in. There is no backfill, deliberately: unlisted blogs are still fully public
+at their own URLs and still federate, so the only thing "unlisted" withholds
+is directory listing — which makes listing them retroactively an override of a
+choice their owners were shown.
+
+**The vet gate doesn't cover every fork-owned file.** The vet step in
+`.github/workflows/ci.yml` greps `vet.log` for `(^|/)maxblogs[a-z_]*\.go:`
+only, so a `go vet` finding in `oauth_preauth.go`, `oauth_reconcile.go`, or
+`home.go` — all fork-owned, none named `maxblogs*` — would print as
+"informational" and pass CI silently rather than fail the build. Pre-existing,
+not fixed here: `home.go` was kept vet-clean by hand during this work in lieu
+of a real gate. Before relying on this gate for anything beyond `maxblogs.go`
+itself, widen the grep to name every fork-owned file (or match on the fork's
+copyright header instead of specific filenames).
