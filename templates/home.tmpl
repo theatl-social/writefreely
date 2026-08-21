@@ -1,0 +1,77 @@
+{{define "head"}}<title>{{.SiteName}}</title>
+		<link rel="alternate" type="application/rss+xml" title="{{.SiteName}} Reader" href="/read/feed/" />
+		<meta name="description" content="Read the latest posts and blogs from {{.SiteName}}.">
+		<meta property="og:title" content="{{.SiteName}}" />
+		<meta property="og:type" content="website" />
+		<meta property="og:description" content="Read the latest posts and blogs from {{.SiteName}}." />
+		<style>
+		#home-wrap { display: flex; gap: 3rem; align-items: flex-start; max-width: 60rem; margin: 0 auto; padding: 0 1rem; }
+		#home-posts { flex: 3 1 0; min-width: 0; }
+		#home-blogs { flex: 1 1 16rem; font-size: 0.9em; }
+		#home-blogs h2, #home-posts h2.section { font-weight: 300; font-size: 1.2em; color: #777; margin: 2em 0 1em; }
+		#home-blogs ul { list-style: none; padding: 0; }
+		#home-blogs li { margin: 0 0 1.5em; }
+		#home-blogs .blog-title { font-weight: 500; }
+		#home-blogs .blog-meta { color: #777; font-size: 0.86em; }
+		.preview { max-height: 180px; overflow: hidden; position: relative; }
+		.preview .over { position: absolute; top: 5em; bottom: 0; left: 0; right: 0;
+			background: linear-gradient(to bottom, rgba(255,255,255,0) 0%, rgba(255,255,255,1) 100%); }
+		p.source { font-size: 0.86em; color: #777; margin-top: 0; }
+		@media (max-width: 40rem) { #home-wrap { display: block; } #home-blogs { margin-top: 3em; } }
+		</style>
+{{end}}
+{{define "content"}}
+<div id="home-wrap">
+
+	<div id="home-posts">
+		<h2 class="section">Latest posts</h2>
+		{{if gt (len .Posts) 0}}
+		<section itemscope itemtype="http://schema.org/Blog">
+			{{range .Posts}}<article class="{{.Font}} h-entry" itemscope itemtype="http://schema.org/BlogPosting">
+				{{if .Title.String -}}
+				<h2 class="post-title" itemprop="name">
+					<a href="{{if .Collection}}{{.Collection.CanonicalURL}}{{.Slug.String}}{{else}}{{.CanonicalURL $.Host}}.md{{end}}" itemprop="url" class="u-url">{{.PlainDisplayTitle}}</a>
+				</h2>
+				<time class="dt-published" datetime="{{.Created8601}}" pubdate itemprop="datePublished" content="{{.Created}}">{{.DisplayDate}}</time>
+				{{- else -}}
+				<h2 class="post-title" itemprop="name">
+					<time class="dt-published" datetime="{{.Created8601}}" pubdate itemprop="datePublished" content="{{.Created}}"><a href="{{if .Collection}}{{.Collection.CanonicalURL}}{{.Slug.String}}{{else}}{{.CanonicalURL $.Host}}.md{{end}}" itemprop="url" class="u-url">{{.DisplayDate}}</a></time>
+				</h2>
+				{{- end}}
+				<p class="source">{{if .Collection}}from <a href="{{.Collection.CanonicalURL}}">{{.Collection.DisplayTitle}}</a>{{else}}<em>Anonymous</em>{{end}}</p>
+				{{if .Excerpt}}<div class="p-summary" {{if .Language}}lang="{{.Language.String}}"{{end}} dir="{{.Direction}}">{{.Excerpt}}</div>
+				<a class="read-more" href="{{if .Collection}}{{.Collection.CanonicalURL}}{{.Slug.String}}{{else}}{{.CanonicalURL $.Host}}.md{{end}}">{{localstr "Read more..." .Language.String}}</a>
+				{{else}}<div class="e-content preview" {{if .Language}}lang="{{.Language.String}}"{{end}} dir="{{.Direction}}">{{if not .HTMLContent}}<p>{{.Content}}</p>{{else}}{{.HTMLContent}}{{end}}<div class="over">&nbsp;</div></div>
+				<a class="read-more maybe" href="{{if .Collection}}{{.Collection.CanonicalURL}}{{.Slug.String}}{{else}}{{.CanonicalURL $.Host}}.md{{end}}">{{localstr "Read more..." .Language.String}}</a>{{end}}
+			</article>{{end}}
+		</section>
+		{{if .MorePosts}}<p><a href="/read">More posts &#8674;</a></p>{{end}}
+		{{else}}
+		<div class="attention-box">
+			<p>No posts here yet.</p>
+			<p>Posts appear here once a blog is set to <strong>public</strong>. If you have a blog, open its
+			<a href="/me/c/">blog settings</a> and set its visibility to public to have it listed.</p>
+		</div>
+		{{end}}
+	</div>
+
+	<aside id="home-blogs">
+		<h2>Active blogs</h2>
+		{{if gt (len .Blogs) 0}}
+		<ul>
+			{{range .Blogs}}<li>
+				<a class="blog-title" href="{{.CanonicalURL}}">{{.DisplayTitle}}</a>
+				{{if .Description}}<div class="blog-desc">{{.Description}}</div>{{end}}
+				<div class="blog-meta">{{.PostCount}} {{pluralize "post" "posts" .PostCount}}</div>
+			</li>{{end}}
+		</ul>
+		{{if .MoreBlogs}}<p><a href="/blogs">All blogs &#8674;</a></p>{{end}}
+		{{else}}
+		<p>No public blogs yet. Set a blog's visibility to <strong>public</strong> in
+		<a href="/me/c/">blog settings</a> to have it listed here.</p>
+		{{end}}
+	</aside>
+
+</div>
+<script src="/js/localdate.js"></script>
+{{end}}

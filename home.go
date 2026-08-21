@@ -17,6 +17,7 @@ import (
 	"github.com/writeas/impart"
 	"github.com/writeas/web-core/log"
 	"github.com/writeas/web-core/memo"
+	"github.com/writefreely/writefreely/page"
 )
 
 const (
@@ -124,4 +125,72 @@ func updateHomeBlogsCache(app *App, reset bool) {
 		cast := blogsInterface.([]HomeBlog)
 		tl.blogs = &cast
 	}
+}
+
+// homePage is the data the / digest template renders from.
+type homePage struct {
+	page.StaticPage
+	Posts *[]PublicPost
+	Blogs *[]HomeBlog
+
+	// MorePosts and MoreBlogs tell the template whether the "see all" links
+	// lead anywhere the visitor has not already seen.
+	MorePosts bool
+	MoreBlogs bool
+}
+
+// homePageData assembles the digest's data without rendering it, so tests can
+// assert on the slicing without parsing HTML.
+func homePageData(app *App, r *http.Request) *homePage {
+	updateTimelineCache(app.timeline, false)
+	updateHomeBlogsCache(app, false)
+
+	posts := []PublicPost{}
+	morePosts := false
+	// app.timeline.posts is nil until the first successful fetch, and stays
+	// nil if that fetch failed — updateTimelineCache logs rather than panics.
+	if app.timeline != nil && app.timeline.posts != nil {
+		all := *app.timeline.posts
+		morePosts = len(all) > homePostLimit
+		if len(all) > homePostLimit {
+			all = all[:homePostLimit]
+		}
+		posts = all
+	}
+
+	blogs := []HomeBlog{}
+	moreBlogs := false
+	if app.homeFeed != nil && app.homeFeed.blogs != nil {
+		all := *app.homeFeed.blogs
+		moreBlogs = len(all) > homeBlogLimit
+		if len(all) > homeBlogLimit {
+			all = all[:homeBlogLimit]
+		}
+		blogs = all
+	}
+
+	d := &homePage{
+		StaticPage: pageForReq(app, r),
+		Posts:      &posts,
+		Blogs:      &blogs,
+		MorePosts:  morePosts,
+		MoreBlogs:  moreBlogs,
+	}
+	u := getUserSession(app, r)
+	d.IsAdmin = u != nil && u.IsAdmin()
+	d.CanInvite = canUserInvite(app.cfg, d.IsAdmin)
+	return d
+}
+
+// viewHome renders the instance discovery feed at /.
+func viewHome(app *App, w http.ResponseWriter, r *http.Request) error {
+	if !app.cfg.App.LocalTimeline {
+		return impart.HTTPError{Status: http.StatusNotFound, Message: "Page doesn't exist."}
+	}
+
+	if err := templates["home"].ExecuteTemplate(w, "base", homePageData(app, r)); err != nil {
+		log.Error("Unable to render home: %v", err)
+		return impart.HTTPError{Status: http.StatusInternalServerError, Message: "Couldn't render page."}
+	}
+	return nil
 }
