@@ -141,11 +141,49 @@ func homeTestApp(t *testing.T) *App {
 
 	app := &App{
 		cfg:          cfg,
+		db:           homeTestDatastore(t),
 		sessionStore: sessions.NewCookieStore([]byte("secret-key")),
 	}
 	initLocalTimeline(app)
 	initHomeFeed(app)
 	return app
+}
+
+// homeTestDatastore backs app.db with a real (in-memory) sqlite connection
+// instead of leaving it nil.
+//
+// handleViewHome's existing (pre-fork) branches -- the landing page at
+// ?landing=1, and the Pad for logged-in users -- both reach into app.db
+// (landing fetches the configurable banner/body content via
+// GetDynamicContent; the Pad fetches the user's blogs) regardless of this
+// fork's change. A nil app.db panics the instant either path runs, which
+// would make TestHandleViewHomeStillHonoursForcedLanding fail for a reason
+// that has nothing to do with this task's routing change and is just as
+// true before it as after. Only the `appcontent` table is created, which is
+// all GetDynamicContent needs; every other db-shaped path some of these
+// tests take (e.g. SingleUser's handleViewCollection, or the Pad's other
+// queries) still hits a missing table and errors or panics, which those
+// tests already tolerate or don't reach.
+func homeTestDatastore(t *testing.T) *datastore {
+	t.Helper()
+
+	sqlDB, err := sql.Open("sqlite3_with_regex", ":memory:")
+	require.NoError(t, err)
+	// Keep every query on the same connection -- ":memory:" gives each new
+	// connection its own empty database otherwise.
+	sqlDB.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = sqlDB.Close() })
+
+	_, err = sqlDB.Exec(`CREATE TABLE appcontent (
+		id TEXT NOT NULL PRIMARY KEY,
+		title TEXT NOT NULL DEFAULT '',
+		content TEXT NOT NULL DEFAULT '',
+		updated DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		content_type TEXT NOT NULL DEFAULT ''
+	)`)
+	require.NoError(t, err)
+
+	return &datastore{DB: sqlDB, driverName: driverSQLite}
 }
 
 func TestViewHomeRendersWithColdCaches(t *testing.T) {
@@ -232,4 +270,89 @@ func TestViewHomeShowsFewerPostsThanLimit(t *testing.T) {
 	req := httptest.NewRequest("GET", "/", nil)
 	assert.Len(t, *homePageData(app, req).Posts, 3,
 		"slicing must not pad or over-read when fewer posts than the limit are cached")
+}
+
+// handleHome renders handleViewHome and returns the response, following one
+// redirect's Location header rather than the body when a redirect is issued.
+func handleHome(t *testing.T, app *App, req *http.Request) *httptest.ResponseRecorder {
+	t.Helper()
+	w := httptest.NewRecorder()
+	err := handleViewHome(app, w, req)
+	if err != nil {
+		// impart.HTTPError carries redirects as Status 302 + Message = target.
+		if httpErr, ok := err.(impart.HTTPError); ok {
+			w.Code = httpErr.Status
+			w.Header().Set("Location", httpErr.Message)
+			return w
+		}
+		t.Fatalf("handleViewHome: %v", err)
+	}
+	return w
+}
+
+func TestHandleViewHomeShowsFeedToAnonymous(t *testing.T) {
+	app := homeTestApp(t)
+
+	w := handleHome(t, app, httptest.NewRequest("GET", "/", nil))
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "Active blogs",
+		"anonymous visitors get the feed, not the landing page")
+}
+
+func TestHandleViewHomeShowsFeedToLoggedInUsers(t *testing.T) {
+	app := homeTestApp(t)
+
+	// Establish a session the same way the app does, then replay its cookie.
+	setupW := httptest.NewRecorder()
+	setupReq := httptest.NewRequest("GET", "/", nil)
+	session, err := app.sessionStore.Get(setupReq, cookieName)
+	require.NoError(t, err)
+	session.Values[cookieUserVal] = &User{Username: "member"}
+	require.NoError(t, session.Save(setupReq, setupW))
+
+	req := httptest.NewRequest("GET", "/", nil)
+	for _, c := range setupW.Result().Cookies() {
+		req.AddCookie(c)
+	}
+
+	w := handleHome(t, app, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "Active blogs",
+		"logged-in members get the feed too -- this is the behaviour change; they used to land in the editor")
+}
+
+func TestHandleViewHomeStillHonoursForcedLanding(t *testing.T) {
+	app := homeTestApp(t)
+
+	w := handleHome(t, app, httptest.NewRequest("GET", "/?landing=1", nil))
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.NotContains(t, w.Body.String(), "Active blogs",
+		"?landing=1 must still reach the landing page")
+}
+
+func TestHandleViewHomeLeavesSingleUserModeAlone(t *testing.T) {
+	app := homeTestApp(t)
+	app.cfg.App.SingleUser = true
+
+	w := httptest.NewRecorder()
+	func() {
+		// Single-user mode returns at the first line of handleViewHome into
+		// handleViewCollection, which needs a database this test App does not
+		// have. Panicking or erroring there is fine -- the assertion is that we
+		// got THERE rather than rendering the instance feed, which would mean
+		// the fork's branch had been hoisted above the SingleUser return.
+		defer func() { _ = recover() }()
+		_ = handleViewHome(app, w, httptest.NewRequest("GET", "/", nil))
+	}()
+	assert.NotContains(t, w.Body.String(), "Active blogs",
+		"single-user instances render their blog index at /, never the instance feed")
+}
+
+func TestHandleViewHomeStillRedirectsAnonymousOnPrivateInstance(t *testing.T) {
+	app := homeTestApp(t)
+	app.cfg.App.Private = true
+
+	w := handleHome(t, app, httptest.NewRequest("GET", "/", nil))
+	assert.NotContains(t, w.Body.String(), "Active blogs",
+		"a private instance must not show the feed to anonymous visitors")
 }
