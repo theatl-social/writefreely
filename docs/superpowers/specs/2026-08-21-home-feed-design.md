@@ -232,25 +232,21 @@ type homeFeed struct {
     blogs *[]HomeBlog
 }
 
-// HomeBlog is one row of the active-blogs query. It is deliberately not a
-// Collection: the feed needs aggregates (LastPost, PostCount) that Collection
-// has no field for, and needs none of Collection's style/script/format
-// columns.
+// HomeBlog is one row of the active-blogs query. It follows CollectionObj's
+// pattern (collections.go): embed Collection, add the aggregates Collection
+// has no field for. Embedding means CanonicalURL(), DisplayTitle(), and the
+// unexported hostName come for free rather than being reimplemented, and the
+// columns the feed does not need (style_sheet, script, format, signature)
+// simply go unscanned.
 type HomeBlog struct {
-    ID          int64
-    Alias       string
-    Title       string
-    Description string
-    Views       int64
-    LastPost    time.Time
-    PostCount   int64
-
-    hostName string // set from cfg.App.Host after scan, for URL building
+    Collection
+    LastPost  time.Time
+    PostCount int64
 }
 ```
 
-`HomeBlog` gets a `CanonicalURL()` and a `DisplayTitle()` mirroring
-`Collection`'s, so the templates read the same way as the rest of the codebase.
+Because `Collection` is embedded, `hostName` must be set on each row after
+scanning (from `cfg.App.Host`) or `CanonicalURL()` returns a host-less URL.
 
 **Display counts** are named constants in `home.go`, not literals scattered
 through handlers and templates:
