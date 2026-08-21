@@ -59,7 +59,7 @@ func (app *App) fetchActiveBlogs() (interface{}, error) {
 	ORDER BY last_post DESC`)
 	if err != nil {
 		log.Error("[HOME] Failed selecting active blogs: %v", err)
-		return nil, impart.HTTPError{http.StatusInternalServerError, "Couldn't retrieve blogs."}
+		return nil, impart.HTTPError{Status: http.StatusInternalServerError, Message: "Couldn't retrieve blogs."}
 	}
 	defer rows.Close()
 
