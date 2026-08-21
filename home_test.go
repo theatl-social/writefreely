@@ -152,18 +152,16 @@ func homeTestApp(t *testing.T) *App {
 // homeTestDatastore backs app.db with a real (in-memory) sqlite connection
 // instead of leaving it nil.
 //
-// handleViewHome's existing (pre-fork) branches -- the landing page at
-// ?landing=1, and the Pad for logged-in users -- both reach into app.db
-// (landing fetches the configurable banner/body content via
-// GetDynamicContent; the Pad fetches the user's blogs) regardless of this
-// fork's change. A nil app.db panics the instant either path runs, which
-// would make TestHandleViewHomeStillHonoursForcedLanding fail for a reason
-// that has nothing to do with this task's routing change and is just as
-// true before it as after. Only the `appcontent` table is created, which is
-// all GetDynamicContent needs; every other db-shaped path some of these
-// tests take (e.g. SingleUser's handleViewCollection, or the Pad's other
-// queries) still hits a missing table and errors or panics, which those
-// tests already tolerate or don't reach.
+// handleViewHome's existing (pre-fork) ?landing=1 branch reaches into app.db
+// regardless of this fork's change: it renders the landing page, which
+// fetches the configurable banner/body content via GetDynamicContent. A nil
+// app.db panics the instant that runs, which would make
+// TestHandleViewHomeStillHonoursForcedLanding fail for a reason that has
+// nothing to do with this task's routing change and is just as true before
+// it as after. Only the `appcontent` table is created, which is all
+// GetDynamicContent needs; every other db-shaped path some of these tests
+// take (e.g. SingleUser's handleViewCollection) still hits a missing table
+// and errors or panics, which those tests already tolerate or don't reach.
 func homeTestDatastore(t *testing.T) *datastore {
 	t.Helper()
 
@@ -193,15 +191,14 @@ func TestViewHomeRendersWithColdCaches(t *testing.T) {
 	// *[]PublicPost here, which is the single most likely panic in this
 	// feature: slicing it without a nil check dereferences nil.
 	//
-	// homeTestApp's App has a nil app.db, so the real database-backed memos
-	// (app.FetchPublicPosts, app.fetchActiveBlogs) would panic on a nil
-	// dereference the moment a cold cache triggers a fetch. That would look
-	// like proof of the very nil-deref bug this test exists to prevent, when
-	// it is really just a test fixture touching a database it was never given.
-	// Substitute memos that fail cleanly instead, so the test exercises the
-	// real production path: the first fetch fails at boot, updateTimelineCache
-	// (and updateHomeBlogsCache) log and leave the cache nil, and viewHome
-	// must render anyway without dereferencing it.
+	// Substitute memos that fail cleanly instead of hitting the real
+	// database-backed ones (app.FetchPublicPosts, app.fetchActiveBlogs),
+	// which would query tables homeTestDatastore doesn't create and fail for
+	// reasons unrelated to what this test is checking. This keeps the cold-
+	// cache path deterministic and database-independent while still
+	// exercising the real production state: the first fetch fails,
+	// updateTimelineCache (and updateHomeBlogsCache) log and leave the cache
+	// nil, and viewHome must render anyway without dereferencing it.
 	app.timeline = &localTimeline{
 		postsPerPage: tlPostsPerPage,
 		m: memo.New(func() (interface{}, error) {
@@ -355,4 +352,40 @@ func TestHandleViewHomeStillRedirectsAnonymousOnPrivateInstance(t *testing.T) {
 	w := handleHome(t, app, httptest.NewRequest("GET", "/", nil))
 	assert.NotContains(t, w.Body.String(), "Active blogs",
 		"a private instance must not show the feed to anonymous visitors")
+}
+
+func TestHandleViewHomeShowsFeedToLoggedInUsersOnPrivateInstance(t *testing.T) {
+	app := homeTestApp(t)
+	app.cfg.App.Private = true
+
+	// Establish a session the same way the app does, then replay its cookie.
+	setupW := httptest.NewRecorder()
+	setupReq := httptest.NewRequest("GET", "/", nil)
+	session, err := app.sessionStore.Get(setupReq, cookieName)
+	require.NoError(t, err)
+	session.Values[cookieUserVal] = &User{Username: "member"}
+	require.NoError(t, session.Save(setupReq, setupW))
+
+	req := httptest.NewRequest("GET", "/", nil)
+	for _, c := range setupW.Result().Cookies() {
+		req.AddCookie(c)
+	}
+
+	w := handleHome(t, app, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "Active blogs",
+		"a logged-in member on a private instance gets the feed, not the login page -- "+
+			"only an anonymous visitor should be bounced to login")
+}
+
+func TestHandleViewHomeStillHonoursLandingPath(t *testing.T) {
+	app := homeTestApp(t)
+	app.cfg.App.Landing = "/read"
+
+	err := handleViewHome(app, httptest.NewRecorder(), httptest.NewRequest("GET", "/", nil))
+	require.Error(t, err)
+	httpErr, ok := err.(impart.HTTPError)
+	require.True(t, ok, "a configured landing path must be returned as an impart.HTTPError redirect, got %T: %v", err, err)
+	assert.Equal(t, http.StatusFound, httpErr.Status)
+	assert.Equal(t, "/read", httpErr.Message)
 }

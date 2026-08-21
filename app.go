@@ -293,7 +293,7 @@ func handleViewHome(app *App, w http.ResponseWriter, r *http.Request) error {
 		}
 
 		if land := app.cfg.App.LandingPath(); land != "/" {
-			return impart.HTTPError{Status: http.StatusFound, Message: land}
+			return impart.HTTPError{http.StatusFound, land}
 		}
 
 		// theATL fork: show the discovery feed (home.go) at / for everyone,
@@ -302,7 +302,11 @@ func handleViewHome(app *App, w http.ResponseWriter, r *http.Request) error {
 		// sit here -- logged-in members land on the feed now, and the editor
 		// has a permanent home at /new in the nav. By this point forceLanding,
 		// SingleUser, private-and-anonymous, and a configured landing path
-		// have all already returned, so / unconditionally means the feed.
+		// have all already returned, so / unconditionally means the feed. One
+		// side effect of moving this below the LandingPath() check: with
+		// `landing` configured, a logged-in user now gets that redirect too,
+		// where upstream only ever sent anonymous visitors there and always
+		// gave a logged-in user the Pad.
 		return viewHome(app, w, r)
 	}
 
