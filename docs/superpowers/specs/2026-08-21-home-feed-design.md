@@ -387,15 +387,25 @@ Following the fork's existing table-driven style (`maxblogs_test.go`,
 
 ## Pre-flight checks before deploy
 
-1. **Query production for an existing collection aliased `blog` or `blogs`.**
-   Reserving the name does not retroactively rename anything already created.
-   If a row exists, it must be renamed (and its owner told) before `/blogs` is
-   registered, or the route will shadow a real blog.
-2. **Count eligible blogs in production**
-   (`privacy = 1 AND u.status = 0` with at least one post). This is the honest
-   answer to "will the feed look empty on launch day" and determines whether
-   the member announcement should go out before or with the deploy.
-3. Confirm `local_timeline` is still `true` in the deployed config.
+1. **Is an existing collection aliased `blog` or `blogs`?** Reserving the name
+   does not retroactively rename anything already created; if a row exists it
+   must be renamed (and its owner told) before `/blogs` is registered, or the
+   route will shadow a real blog.
+
+   *Partially cleared, 2026-08-21:* `/blogs` returns 404 in production. That
+   rules out a post with that ID (the URL currently falls through to
+   `routes.go:235`'s `/{post}` catch-all), but a *collection* aliased `blogs`
+   would be served at `/blogs/` **with** a trailing slash
+   (`routes.go:231`), so confirm that URL 404s too before registering the
+   route.
+
+2. Confirm `local_timeline` is still `true` in the deployed config.
+
+**Not a gate:** the number of blogs currently eligible (`privacy = 1` with at
+least one post) is expected to be small at launch, and that is accepted rather
+than resolved first. Only public blogs are listed; the feed fills as owners opt
+in. The empty-state copy carries this, which is why it is a first-class
+requirement above rather than a fallback.
 
 ## Known limits
 
