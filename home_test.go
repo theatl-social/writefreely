@@ -85,3 +85,33 @@ func TestFetchActiveBlogs(t *testing.T) {
 			"hostName must be set after scan or CanonicalURL loses the host")
 	})
 }
+
+func TestUpdateHomeBlogsCache(t *testing.T) {
+	if !runMySQLTests() {
+		t.Skip("skipping mysql tests")
+	}
+	withTestDB(t, func(db *sql.DB) {
+		ds := &datastore{DB: db, driverName: driverMySQL}
+		cfg := config.New()
+		cfg.App.SingleUser = false
+		cfg.App.Host = "https://write.example.test"
+		app := &App{db: ds, cfg: cfg}
+
+		seedBlog(t, db, "one", 1, 0, []string{"INTERVAL 1 HOUR"})
+		initHomeFeed(app)
+		require.NotNil(t, app.homeFeed, "initHomeFeed must populate the field")
+		assert.Nil(t, app.homeFeed.blogs, "cache starts cold, not eagerly fetched")
+
+		updateHomeBlogsCache(app, false)
+		require.NotNil(t, app.homeFeed.blogs)
+		assert.Equal(t, []string{"one"}, aliasesOf(*app.homeFeed.blogs))
+
+		// A failing query must not blank a populated cache: the home page
+		// should keep serving slightly stale blogs rather than an empty strip.
+		require.NoError(t, db.Close())
+		updateHomeBlogsCache(app, true)
+		require.NotNil(t, app.homeFeed.blogs, "a failed refresh must not nil the cache")
+		assert.Equal(t, []string{"one"}, aliasesOf(*app.homeFeed.blogs),
+			"stale data is served on refresh failure")
+	})
+}

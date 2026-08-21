@@ -16,6 +16,7 @@ import (
 
 	"github.com/writeas/impart"
 	"github.com/writeas/web-core/log"
+	"github.com/writeas/web-core/memo"
 )
 
 const (
@@ -82,4 +83,45 @@ func (app *App) fetchActiveBlogs() (interface{}, error) {
 	}
 
 	return blogs, nil
+}
+
+// homeFeed caches the active-blogs query. It deliberately mirrors
+// localTimeline (read.go): a memo.Memo plus the last good result, refreshed
+// lazily on read rather than by a background ticker.
+type homeFeed struct {
+	m     *memo.Memo
+	blogs *[]HomeBlog
+}
+
+func initHomeFeed(app *App) {
+	app.homeFeed = &homeFeed{
+		m: memo.New(app.fetchActiveBlogs, tlCacheDur),
+	}
+}
+
+// updateHomeBlogsCache refreshes the blogs cache if it is cold, if reset is
+// true, or if the memo's TTL has elapsed. It follows updateTimelineCache's
+// shape (read.go), including its failure behaviour: on a query error it logs
+// and leaves the previous result in place, because half a stale home page
+// beats an empty one.
+func updateHomeBlogsCache(app *App, reset bool) {
+	tl := app.homeFeed
+	if tl == nil {
+		return
+	}
+	if reset {
+		tl.m.Reset()
+	}
+
+	if tl.blogs == nil || reset || tl.m.Invalidate() {
+		log.Info("[HOME] Updating active blogs cache")
+
+		blogsInterface, err := tl.m.Get()
+		if err != nil {
+			log.Error("[HOME] Unable to cache blogs: %v", err)
+			return
+		}
+		cast := blogsInterface.([]HomeBlog)
+		tl.blogs = &cast
+	}
 }

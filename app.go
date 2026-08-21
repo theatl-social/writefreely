@@ -85,6 +85,12 @@ type App struct {
 
 	timeline *localTimeline
 
+	// theATL fork: cache backing the / discovery feed's "active blogs" strip
+	// and the /blogs directory (home.go). Kept separate from `timeline` above
+	// because it answers a different question (which blogs are active) with a
+	// different query, but shares its TTL and lifetime.
+	homeFeed *homeFeed
+
 	// theATL fork: a small, dedicated connection pool used ONLY for pinning
 	// the GET_LOCK()/RELEASE_LOCK() connection withOauthIdentityLock
 	// (oauth_preauth.go) needs for its MariaDB session-scoped advisory lock.
@@ -473,6 +479,10 @@ func Initialize(apper Apper, debug bool) (*App, error) {
 	if apper.App().cfg.App.LocalTimeline {
 		log.Info("Initializing local timeline...")
 		initLocalTimeline(apper.App())
+		// theATL fork: the / discovery feed reads app.timeline for its posts,
+		// so it can only be initialized where the timeline is. Sharing the
+		// guard keeps them from ever existing independently.
+		initHomeFeed(apper.App())
 	}
 
 	return apper.App(), nil
