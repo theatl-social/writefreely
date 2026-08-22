@@ -154,6 +154,14 @@ func homeTestApp(t *testing.T) *App {
 // homeTestDatastore backs app.db with a real (in-memory) sqlite connection
 // instead of leaving it nil.
 //
+// This drags in a build-tag coupling worth flagging: "sqlite3_with_regex" is
+// registered by database-sqlite.go, which is gated behind the `sqlite` build
+// tag, but this file carries no build constraint of its own. `go test
+// -tags='netgo'` (sqlite omitted) would fail every test in this file at
+// runtime with "sql: unknown driver" rather than at compile time. CI always
+// runs with `-tags='netgo sqlite'`, so this has never bitten anyone in
+// practice -- noted here so it doesn't have to be rediscovered.
+//
 // handleViewHome's existing (pre-fork) ?landing=1 branch reaches into app.db
 // regardless of this fork's change: it renders the landing page, which
 // fetches the configurable banner/body content via GetDynamicContent. A nil
@@ -246,7 +254,7 @@ func TestViewHomeCapsPostsAtLimit(t *testing.T) {
 
 	posts := make([]PublicPost, homePostLimit+5)
 	app.timeline.posts = &posts
-	blogs := []HomeBlog{}
+	blogs := make([]HomeBlog, homeBlogLimit+4)
 	app.homeFeed.blogs = &blogs
 
 	// Asserts on the data, not the rendered HTML: zero-value PublicPosts are
@@ -254,8 +262,15 @@ func TestViewHomeCapsPostsAtLimit(t *testing.T) {
 	// CanonicalURL walks it). Render coverage lives in the cold-cache test,
 	// where the slices are legitimately empty.
 	req := httptest.NewRequest("GET", "/", nil)
-	assert.Len(t, *homePageData(app, req).Posts, homePostLimit,
+	data := homePageData(app, req)
+	assert.Len(t, *data.Posts, homePostLimit,
 		"the digest shows exactly homePostLimit posts even when more are cached")
+	assert.True(t, data.MorePosts,
+		"more posts are cached than shown, so the '/read' link must render")
+	assert.Len(t, *data.Blogs, homeBlogLimit,
+		"the digest shows exactly homeBlogLimit blogs even when more are cached")
+	assert.True(t, data.MoreBlogs,
+		"more blogs are cached than shown, so the '/blogs' link must render")
 }
 
 func TestViewHomeShowsFewerPostsThanLimit(t *testing.T) {
@@ -263,12 +278,18 @@ func TestViewHomeShowsFewerPostsThanLimit(t *testing.T) {
 
 	posts := make([]PublicPost, 3)
 	app.timeline.posts = &posts
-	blogs := []HomeBlog{}
+	blogs := make([]HomeBlog, 2)
 	app.homeFeed.blogs = &blogs
 
 	req := httptest.NewRequest("GET", "/", nil)
-	assert.Len(t, *homePageData(app, req).Posts, 3,
+	data := homePageData(app, req)
+	assert.Len(t, *data.Posts, 3,
 		"slicing must not pad or over-read when fewer posts than the limit are cached")
+	assert.False(t, data.MorePosts,
+		"every cached post is already shown, so the '/read' link must not render")
+	assert.Len(t, *data.Blogs, 2)
+	assert.False(t, data.MoreBlogs,
+		"every cached blog is already shown, so the '/blogs' link must not render")
 }
 
 // handleHome renders handleViewHome and returns the response, following one
@@ -330,6 +351,12 @@ func TestHandleViewHomeStillHonoursForcedLanding(t *testing.T) {
 }
 
 func TestHandleViewHomeLeavesSingleUserModeAlone(t *testing.T) {
+	// Differential rather than absence-only: proving the feed is NOT shown
+	// when SingleUser is true is weak on its own (an empty body would also
+	// satisfy it). Running the same app with SingleUser false right after,
+	// and requiring the feed appear THERE, proves the SingleUser branch is
+	// what suppressed it, rather than something incidental (e.g. a panic
+	// that blanked the body regardless of which branch ran).
 	app := homeTestApp(t)
 	app.cfg.App.SingleUser = true
 
@@ -345,6 +372,12 @@ func TestHandleViewHomeLeavesSingleUserModeAlone(t *testing.T) {
 	}()
 	assert.NotContains(t, w.Body.String(), "Active blogs",
 		"single-user instances render their blog index at /, never the instance feed")
+
+	app.cfg.App.SingleUser = false
+	w2 := handleHome(t, app, httptest.NewRequest("GET", "/", nil))
+	assert.Contains(t, w2.Body.String(), "Active blogs",
+		"the same app with SingleUser false must show the feed, proving SingleUser "+
+			"was what suppressed it above")
 }
 
 func TestHandleViewHomeStillRedirectsAnonymousOnPrivateInstance(t *testing.T) {
@@ -354,6 +387,11 @@ func TestHandleViewHomeStillRedirectsAnonymousOnPrivateInstance(t *testing.T) {
 	w := handleHome(t, app, httptest.NewRequest("GET", "/", nil))
 	assert.NotContains(t, w.Body.String(), "Active blogs",
 		"a private instance must not show the feed to anonymous visitors")
+	// Positive assertion that this is really the login page (pages/login.tmpl),
+	// not just some non-feed response: an empty body would satisfy the
+	// NotContains check above but not this one.
+	assert.Contains(t, w.Body.String(), `action="/auth/login"`,
+		"anonymous visitors on a private instance must land on the login page")
 }
 
 func TestHandleViewHomeShowsFeedToLoggedInUsersOnPrivateInstance(t *testing.T) {
@@ -414,6 +452,31 @@ func TestBlogsDirectoryPaginates(t *testing.T) {
 		beyond := blogsPageData(app, httptest.NewRequest("GET", "/blogs/p/99", nil), 99)
 		assert.Len(t, *beyond.Blogs, 0)
 	})
+}
+
+// TestBlogsDirectoryShowsEmptyState exercises the /blogs empty-state
+// branch, which matters more than an ordinary edge case: blogs default to
+// unlisted on this instance, so an empty directory is the expected
+// launch-day view -- the state most first-time visitors will actually see.
+func TestBlogsDirectoryShowsEmptyState(t *testing.T) {
+	app := homeTestApp(t)
+
+	blogs := []HomeBlog{}
+	app.homeFeed.blogs = &blogs
+
+	req := httptest.NewRequest("GET", "/blogs", nil)
+	w := httptest.NewRecorder()
+
+	require.NoError(t, viewBlogsDirectory(app, w, req))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	data := blogsPageData(app, req, 1)
+	assert.GreaterOrEqual(t, data.TotalPages, 1,
+		"an empty directory must still report at least one page, not zero")
+	assert.Len(t, *data.Blogs, 0)
+
+	assert.Contains(t, w.Body.String(), "blog settings",
+		"the empty state must tell visitors how a blog gets listed")
 }
 
 // The /{collection} catch-all at routes.go:230-232 will swallow /blogs unless

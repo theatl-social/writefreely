@@ -1,11 +1,11 @@
 /*
- * Copyright © 2018-2021 Musing Studio LLC.
+ * Copyright © 2026 theATL.social.
  *
- * This file is part of WriteFreely.
+ * This file is part of the theATL.social fork of WriteFreely and is licensed
+ * under the GNU Affero General Public License, included in the LICENSE file in
+ * this source code package.
  *
- * WriteFreely is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License, included
- * in the LICENSE file in this source code package.
+ * OAuth login reconciliation retry. See FORK.md.
  */
 
 package writefreely

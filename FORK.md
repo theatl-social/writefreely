@@ -124,13 +124,14 @@ the footer version-link fix), so this is not the first time it has diverged
 from upstream, and conflicts there are still worth checking on every merge.
 
 Wholly new, fork-owned files — `maxblogs.go`, `maxblogs_api.go`,
-`oauth_preauth.go`, and `home.go` — carry their own full copyright header
-instead of a `theATL fork:` comment on an upstream line, and are not part of
-this budget: there is no upstream version of them to conflict with. Their
-`_test.go` counterparts (`maxblogs_test.go`, `oauth_preauth_test.go`,
-`home_test.go`) do NOT carry that header — non-test fork-owned files carry
-it, their `_test.go` counterparts don't — and are likewise outside this
-budget, for the same reason: no upstream version exists to conflict with.
+`oauth_preauth.go`, `oauth_reconcile.go`, and `home.go` — carry their own
+full copyright header instead of a `theATL fork:` comment on an upstream
+line, and are not part of this budget: there is no upstream version of them
+to conflict with. Their `_test.go` counterparts (`maxblogs_test.go`,
+`oauth_preauth_test.go`, `oauth_reconcile_test.go`, `home_test.go`) do NOT
+carry that header — non-test fork-owned files carry it, their `_test.go`
+counterparts don't — and are likewise outside this budget, for the same
+reason: no upstream version exists to conflict with.
 `oauth_signup.go` is unmodified upstream code left in place but unrouted
 (see the "What diverges" table above) — also not on this budget, since
 nothing in it was changed.
