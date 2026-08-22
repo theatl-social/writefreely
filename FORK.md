@@ -90,12 +90,18 @@ bind-mounted from `./data` on the host (`docker-compose.prod.yml`).
 production's `default_visibility`.** Someone has to hand-edit the production
 `config.ini` to add `default_visibility = public` and restart the container.
 
-Miss this and nothing looks broken: the app runs, existing blogs work,
-nothing errors or logs a warning. New blogs just keep defaulting to
-unlisted, so the feed and `/blogs` stay permanently empty — the feature is
-fully implemented and completely invisible. Check this by hand on every
-deploy that includes this branch; there is no code-level way to detect a
-missing config edit.
+Miss this and nothing looks broken: the app runs, existing blogs work, and
+new blogs just keep defaulting to unlisted, so the feed and `/blogs` stay
+permanently empty even though the feature is fully implemented.
+
+That part is still true even with the check below — the pages still render
+empty either way, silently. What's no longer true is that the *cause* is
+invisible: `initHomeFeed` (`home.go`) logs a startup warning whenever
+`local_timeline` is enabled and `default_visibility` isn't `public`, naming
+the misconfigured setting. So a missed edit shows up in the container logs
+at boot; nothing on the page itself will tell you. Still check this by hand
+on every deploy that includes this branch — the warning is a safety net for
+when that check is missed, not a substitute for it.
 
 ## Why the schema change avoids the migration system
 

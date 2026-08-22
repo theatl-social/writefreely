@@ -21,6 +21,7 @@ import (
 	"github.com/writeas/impart"
 	"github.com/writeas/web-core/log"
 	"github.com/writeas/web-core/memo"
+	"github.com/writefreely/writefreely/config"
 	"github.com/writefreely/writefreely/page"
 )
 
@@ -102,6 +103,26 @@ func initHomeFeed(app *App) {
 	app.homeFeed = &homeFeed{
 		m: memo.New(app.fetchActiveBlogs, tlCacheDur),
 	}
+
+	// theATL fork: the feed and /blogs only ever list PUBLIC blogs. If new
+	// blogs are still being created unlisted, both pages stay permanently
+	// empty and nothing else complains -- see FORK.md, "Deployment
+	// prerequisite". config.ini is gitignored, so this is the failure mode
+	// when a deploy misses the manual production config edit.
+	if defaultVisibilityMisconfiguredForHomeFeed(app.cfg) {
+		log.Error("[WARNING] local_timeline is enabled but default_visibility is %q, not \"public\". "+
+			"New blogs will be created unlisted and will never appear on / or /blogs. "+
+			"See FORK.md, \"Deployment prerequisite\".", app.cfg.App.DefaultVisibility)
+	}
+}
+
+// defaultVisibilityMisconfiguredForHomeFeed reports whether the configured
+// default_visibility will silently starve the home feed and /blogs: both
+// only ever list collections with CollPublic visibility, so anything else
+// (including an unset default_visibility, which defaultVisibility resolves
+// to CollUnlisted) means every newly created blog is invisible to them.
+func defaultVisibilityMisconfiguredForHomeFeed(cfg *config.Config) bool {
+	return defaultVisibility(cfg) != CollPublic
 }
 
 // updateHomeBlogsCache refreshes the blogs cache if it is cold, if reset is

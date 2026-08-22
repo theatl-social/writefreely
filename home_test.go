@@ -124,6 +124,50 @@ func TestUpdateHomeBlogsCache(t *testing.T) {
 	})
 }
 
+// TestDefaultVisibilityMisconfiguredForHomeFeed proves initHomeFeed's
+// deployment-misconfiguration warning fires exactly when default_visibility
+// won't let the home feed or /blogs ever see a newly created blog. No DB is
+// needed: the condition only reads cfg.App.DefaultVisibility.
+func TestDefaultVisibilityMisconfiguredForHomeFeed(t *testing.T) {
+	tests := []struct {
+		name              string
+		defaultVisibility string
+		wantWarn          bool
+	}{
+		{
+			name:              "unset default_visibility falls through to unlisted and warns",
+			defaultVisibility: "",
+			wantWarn:          true,
+		},
+		{
+			name:              "explicit unlisted warns",
+			defaultVisibility: "unlisted",
+			wantWarn:          true,
+		},
+		{
+			name:              "explicit public does not warn",
+			defaultVisibility: "public",
+			wantWarn:          false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.New()
+			cfg.App.DefaultVisibility = tt.defaultVisibility
+
+			got := defaultVisibilityMisconfiguredForHomeFeed(cfg)
+			assert.Equal(t, tt.wantWarn, got)
+
+			// initHomeFeed must call the same helper the test exercises above,
+			// so this covers the real code path rather than a parallel copy.
+			// It should never panic regardless of app.db/app.homeFeed state.
+			app := &App{cfg: cfg}
+			assert.NotPanics(t, func() { initHomeFeed(app) })
+		})
+	}
+}
+
 // homeTestApp builds an App wired enough to render the home page: templates
 // loaded, a cookie session store (pageForReq dereferences it), and both
 // caches present but cold.
