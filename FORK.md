@@ -84,11 +84,36 @@ anonymous traffic.
 ### Deployment prerequisite: `default_visibility` does not get set by merging this branch
 
 `config.ini` is untracked (`.gitignore` has `*.ini`) — only
-`config.ini.example` ships in this repo. Production reads `/data/config.ini`,
-bind-mounted from `./data` on the host (`docker-compose.prod.yml`).
+`config.ini.example` ships in this repo. Production runs from
+`/home/debian/docker-compose.yml` on `theatl-services-ssh.theatl.social` (the
+`writefreely` service, around line 563), which bind-mounts
+`/home/debian/config.ini.writefreely` on the host **read-only** into the
+container as `/go/config.ini`. Two things trip people up here: the mount is
+`:ro`, so you edit the host file, not the container's copy; and that host
+file is owned `bin:bin` mode `-rw-r-----`, so editing it needs `sudo`.
 **Merging this branch to `theatl-main` and redeploying does not change
-production's `default_visibility`.** Someone has to hand-edit the production
-`config.ini` to add `default_visibility = public` and restart the container.
+production's `default_visibility`.** Someone has to `sudo`-edit
+`config.ini.writefreely` on the host to add `default_visibility = public`
+and restart the container.
+
+**The repo's `docker-compose.prod.yml` does not describe this deployment —
+do not use it as deployment guidance.** It's stale relative to what actually
+runs: it says `image: writefreely` where production runs
+`mikehdev/writefreely:<git-describe-tag>` (CI publishes to that name, not
+`writefreely`), and it references a `./data` bind mount production doesn't
+have — the real config path is `config.ini.writefreely` at the compose
+file's own level, as above. This mismatch is exactly what produced the
+original (wrong) version of this section, which cited `/data/config.ini` and
+`docker-compose.prod.yml` from this repo instead of the live host.
+
+Deploying this branch also means bumping the image tag in
+`/home/debian/docker-compose.yml` in the same pass — the `image:` line there
+carries its own inline comment with the `git describe --tags --match 'v*'
+--abbrev=7 origin/theatl-main` procedure for picking the right tag; follow
+that comment rather than guessing a tag here. As of this writing the running
+image is `mikehdev/writefreely:0.17.1-41-g5f40531` and the live `[app]`
+section has no `default_visibility` line at all — the prerequisite this
+section describes is currently unmet in production.
 
 Miss this and nothing looks broken: the app runs, existing blogs work, and
 new blogs just keep defaulting to unlisted, so the feed and `/blogs` stay
