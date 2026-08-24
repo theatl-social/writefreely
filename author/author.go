@@ -35,6 +35,13 @@ var reservedUsernames = map[string]bool{
 	"articles":         true,
 	"auth":             true,
 	"authenticate":     true,
+	// theATL fork: /blogs is the instance blog directory (home.go, registered
+	// in routes.go). Without reserving these, a member could create a
+	// collection aliased "blogs" whose canonical URL collides with that route.
+	// Reserving does NOT rename anything already created — see the pre-flight
+	// check in docs/superpowers/specs/2026-08-21-home-feed-design.md.
+	"blog":             true,
+	"blogs":            true,
 	"browse":           true,
 	"c":                true,
 	"categories":       true,

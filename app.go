@@ -85,6 +85,12 @@ type App struct {
 
 	timeline *localTimeline
 
+	// theATL fork: cache backing the / discovery feed's "active blogs" strip
+	// and the /blogs directory (home.go). Kept separate from `timeline` above
+	// because it answers a different question (which blogs are active) with a
+	// different query, but shares its TTL and lifetime.
+	homeFeed *homeFeed
+
 	// theATL fork: a small, dedicated connection pool used ONLY for pinning
 	// the GET_LOCK()/RELEASE_LOCK() connection withOauthIdentityLock
 	// (oauth_preauth.go) needs for its MariaDB session-scoped advisory lock.
@@ -273,18 +279,35 @@ func handleViewHome(app *App, w http.ResponseWriter, r *http.Request) error {
 			}
 		}
 
-		if u != nil {
-			// User is logged in, so show the Pad
-			return handleViewPad(app, w, r)
-		}
-
-		if app.cfg.App.Private {
+		// theATL fork: on a private instance, only an anonymous visitor gets
+		// bounced to login -- a logged-in user falls through to the feed
+		// below instead of the editor. This is `&& u == nil` added to what
+		// was originally an unconditional `if app.cfg.App.Private`; that
+		// unconditional form used to matter because the very next thing an
+		// anonymous OR logged-in user could reach was the Pad, but the Pad
+		// branch (and its `if u != nil` guard) is gone now that everyone
+		// lands on the feed, so this check has to carry the distinction on
+		// its own.
+		if app.cfg.App.Private && u == nil {
 			return viewLogin(app, w, r)
 		}
 
 		if land := app.cfg.App.LandingPath(); land != "/" {
 			return impart.HTTPError{http.StatusFound, land}
 		}
+
+		// theATL fork: show the discovery feed (home.go) at / for everyone,
+		// rather than the landing page for anonymous visitors and the editor
+		// for members. This replaces the handleViewPad branch that used to
+		// sit here -- logged-in members land on the feed now, and the editor
+		// has a permanent home at /new in the nav. By this point forceLanding,
+		// SingleUser, private-and-anonymous, and a configured landing path
+		// have all already returned, so / unconditionally means the feed. One
+		// side effect of moving this below the LandingPath() check: with
+		// `landing` configured, a logged-in user now gets that redirect too,
+		// where upstream only ever sent anonymous visitors there and always
+		// gave a logged-in user the Pad.
+		return viewHome(app, w, r)
 	}
 
 	return handleViewLanding(app, w, r)
@@ -473,6 +496,10 @@ func Initialize(apper Apper, debug bool) (*App, error) {
 	if apper.App().cfg.App.LocalTimeline {
 		log.Info("Initializing local timeline...")
 		initLocalTimeline(apper.App())
+		// theATL fork: the / discovery feed reads app.timeline for its posts,
+		// so it can only be initialized where the timeline is. Sharing the
+		// guard keeps them from ever existing independently.
+		initHomeFeed(apper.App())
 	}
 
 	return apper.App(), nil
