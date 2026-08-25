@@ -417,6 +417,23 @@ ini key is `auth_use_basic_auth`, but setting it `true` sets
 the opposite of what the key name reads like. Reading "use_basic_auth =
 true" and concluding that turns Basic auth ON is exactly backwards.
 
+**Verification:** This risk has been empirically tested against the live
+production Mastodon (2026-08-25). Two probe requests were sent to the
+`https://theatl.social/oauth/token` endpoint using the production
+`client_id` and `client_secret`, with a deliberately invalid authorization
+code. Probe A used HTTP Basic auth only (v0.17.2 default); Probe B put
+credentials in the request body (old behaviour). Both returned
+`{"error":"invalid_grant", ...}` — NOT `invalid_client`. The distinction
+matters: `invalid_grant` indicates client authentication succeeded and only
+the bogus code was rejected (correct outcome); `invalid_client` would mean
+the credentials themselves were refused. Conclusion: theatl.social's Mastodon
+(Doorkeeper) accepts HTTP Basic auth on its token endpoint, so v0.17.2's
+default is safe for this deployment. The probes were run on the production
+host, so the client secret never left it. If a future login failure occurs
+despite this verification, the remediation lever is `auth_use_basic_auth =
+true` in the `[oauth.generic]` config block, which switches credentials
+back into the request body (note the inverted naming again).
+
 **The vet gate doesn't cover every fork-owned file.** The vet step in
 `.github/workflows/ci.yml` greps `vet.log` for `(^|/)maxblogs[a-z_]*\.go:`
 only, so a `go vet` finding in `oauth_preauth.go`, `oauth_reconcile.go`, or
