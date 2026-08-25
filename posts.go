@@ -224,11 +224,11 @@ func (p *Post) DisplayTitle() string {
 	return t
 }
 
-// PlainDisplayTitle strips away Markdown from the generated Post's title (if
-// any), for use in places like RSS feeds and ActivityStreams objects, where
-// the raw Markdown would be unwanted.
+// PlainDisplayTitle strips away Markdown and HTML from the generated Post's
+// title (if any), for use in places like RSS feeds and ActivityStreams objects,
+// where only plain text is wanted.
 func (p *Post) PlainDisplayTitle() string {
-	if t := stripmd.Strip(p.DisplayTitle()); t != "" {
+	if t := stripmd.Strip(stripHTMLWithoutEscaping(p.DisplayTitle())); t != "" {
 		return t
 	}
 	return p.ID
@@ -306,6 +306,18 @@ func (p *Post) HasTitleLink() bool {
 	}
 	hasLink, _ := regexp.MatchString(`([^!]+|^)\[.+\]\(.+\)`, p.Title.String)
 	return hasLink
+}
+
+// UserPage provides the fields expected by the shared "user-navigation"
+// template, which otherwise assumes it's rendering for a page that embeds
+// *UserPage (e.g. the "me" backend pages).
+func (c CollectionPostPage) UserPage() *UserPage {
+	return &UserPage{
+		StaticPage: c.StaticPage,
+		IsAdmin:    c.IsAdmin,
+		CanInvite:  c.CanInvite,
+		CollAlias:  c.CollAlias,
+	}
 }
 
 func (c CollectionPostPage) DisplayMonetization() string {
