@@ -125,24 +125,38 @@ jobs:
       # fixes the underlying newUpdatesCache race.
       #
       # Upstream v0.17.2 shipped a new signup_test.go containing four tests
-      # that are broken on PRISTINE upstream — verified by checking out the
+      # for two named security findings ("Finding A" and "Finding B") but did
+      # NOT ship the corresponding code fixes — verified by checking out the
       # v0.17.2 tag in a clean worktree with none of this fork's code and
       # running them there; all four fail identically with no fork code
-      # present. These are skipped at the PARENT test level (no "/subtest"
-      # qualifier), unlike TestUpdatesRoundTrip/Release_URL above: the whole
-      # test is broken here, not one subtest beneath an otherwise-good parent.
+      # present.
       #
-      # - TestAPISignupClosedRegistration (subtests no_invite_code,
-      #   bogus_invite_code) — both "expected impart.HTTPError, got <nil>"
-      # - TestInitRoutesAlwaysRegistersAPISignup — "expected
-      #   /api/auth/signup to match a route even when OpenRegistration is
-      #   false"
-      # - TestOAuthSignupClosedRegistration (subtests no_invite_code,
-      #   bogus_invite_code)
-      # - TestOAuthSignupCannotSwapInviteCodeWithoutInvalidatingSignature
+      # Finding A (the API signup route stayed registered after an admin
+      # toggled registration closed at runtime, and signup() never validated
+      # invite codes) is now FIXED in this fork -- see the "theATL fork:"
+      # comments in routes.go and account.go -- so its two tests are no
+      # longer skipped:
       #
-      # Re-check all four on every upstream merge and delete them from this
-      # list the moment upstream fixes them.
+      #   - TestAPISignupClosedRegistration
+      #   - TestInitRoutesAlwaysRegistersAPISignup
+      #
+      # Finding B (/oauth/signup's invite-code gate) is deliberately left
+      # unfixed: this fork never routes /oauth/signup at all, and its only
+      # gate, HashTokenParams, is an HMAC keyed on Server.HashSeed, which is
+      # empty in this fork's config -- making it forgeable regardless of
+      # whether InviteCode is signed. Fixing it would add an eighth file to
+      # the merge-surface budget to harden a handler that is unreachable and
+      # would remain forgeable. See FORK.md for the full reasoning and the
+      # trigger conditions for revisiting. Its two tests remain skipped at
+      # the PARENT test level (no "/subtest" qualifier: the whole test is
+      # broken here, not one subtest beneath an otherwise-good parent):
+      #
+      #   - TestOAuthSignupClosedRegistration (subtests no_invite_code,
+      #     bogus_invite_code)
+      #   - TestOAuthSignupCannotSwapInviteCodeWithoutInvalidatingSignature
+      #
+      # Re-check both on every upstream merge and delete them from this list
+      # the moment upstream fixes Finding B (or this fork does).
       - name: Test
         env:
           TEST_MYSQL: '1'
@@ -150,7 +164,7 @@ jobs:
           WF_PASSWORD: ci_pw
           WF_DB: writefreely
           WF_HOST: 127.0.0.1
-        run: go test -vet=off -tags='netgo sqlite' -skip 'TestUpdatesRoundTrip/Release_URL|TestAPISignupClosedRegistration|TestInitRoutesAlwaysRegistersAPISignup|TestOAuthSignupClosedRegistration|TestOAuthSignupCannotSwapInviteCodeWithoutInvalidatingSignature' ./... -v
+        run: go test -vet=off -tags='netgo sqlite' -skip 'TestUpdatesRoundTrip/Release_URL|TestOAuthSignupClosedRegistration|TestOAuthSignupCannotSwapInviteCodeWithoutInvalidatingSignature' ./... -v
 
   secret-scan:
     runs-on: ubuntu-latest

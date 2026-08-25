@@ -49,6 +49,40 @@ Everything else is upstream. Both internal endpoints require the
 `WRITEFREELY_API_SECRET` environment variable (32+ characters) in an
 `X-WriteFreely-Secret` header, and are additionally blocked at our reverse proxy.
 
+**API signup invite-code gate (Finding A).** Upstream v0.17.2 shipped
+`signup_test.go` with tests for two named security findings ("Finding A" and
+"Finding B") but did **not** ship the corresponding code fixes — verified by
+checking out the `v0.17.2` tag in a clean worktree with none of this fork's
+code and confirming both findings' tests fail there too. This fork fixes
+Finding A. Finding B (`/oauth/signup`'s invite-code gate) is deliberately
+left unfixed — see "Known upstream test failures" below for why.
+
+Finding A was two compounding gaps: `/api/auth/signup` was registered in
+`routes.go` only when `open_registration` was true **at boot**, so an admin
+toggling registration closed later left the route live with no invite check
+at all; and `signup()` (`account.go`) never validated invite codes even when
+reachable, so the route — whenever it was reachable — created accounts with
+no gate whatsoever.
+
+| Change | Location |
+|---|---|
+| `/api/auth/signup` registered unconditionally instead of only when `OpenRegistration` was true at boot; the gate now lives in the handler, where it's re-evaluated per-request instead of frozen at startup | `routes.go` |
+| `signup()` validates `ur.InviteCode` via `GetUserInvite` + `Active` when `OpenRegistration` is false, returning 403/404 exactly like the web signup path. Placed after `ur` is fully populated from either the JSON or form branch, before any account is created | `account.go` `signup()` |
+
+This mirrors the check `handleWebSignup` (`unregisteredusers.go`) already
+performs for the web signup path — that path was unaffected by either gap,
+since it never went through `signup()` at all (it calls
+`signupWithRegistration` directly), and already carried upstream's own fix.
+
+**Because upstream shipped tests for this without shipping the fix, a future
+upstream merge must not be assumed to silently carry a real fix along with
+it.** If a later release adds its own code fix alongside (or instead of) the
+tests, treat that as a conflict to reconcile deliberately — read what
+upstream did, compare it to this fork's fix, and pick one (or merge the
+better parts of both) rather than blindly accepting upstream's version and
+regressing this fix, or blindly keeping this fork's version and missing an
+improvement upstream made.
+
 **Instance discovery feed.** Upstream shows a marketing landing page to
 anonymous visitors at `/` and the editor to logged-in ones, and has no page
 anywhere that lists the blogs an instance hosts. This fork serves a discovery
@@ -227,27 +261,51 @@ merge-surface budget above, and unrelated to anything in this fork:
 Revisit on every upstream merge. Delete this entry the moment a release fixes
 the underlying race.
 
-CI also skips four more tests as of the v0.17.2 merge, all from a new
-`signup_test.go` upstream shipped in that release. Unlike the entry above,
-these are skipped at the **parent test level** — no `/subtest` qualifier —
-because the whole test is broken, not one subtest beneath an otherwise-good
-parent; qualifying them the way `TestUpdatesRoundTrip/Release_URL` is
-qualified would leave the broken parent assertion running. Verified against
-pristine upstream: checked out the `v0.17.2` tag in a clean worktree with
-none of this fork's code and ran them there, and all four fail identically
-with no fork code present — they are upstream's own broken tests, not
-something this fork's changes caused:
+Upstream v0.17.2 also shipped a new `signup_test.go` with four tests for two
+named security findings ("Finding A" and "Finding B"), but no corresponding
+code fix for either. Unlike the entry above, all four were (and the
+remaining two still are) skipped at the **parent test level** — no
+`/subtest` qualifier — because the whole test is broken, not one subtest
+beneath an otherwise-good parent; qualifying them the way
+`TestUpdatesRoundTrip/Release_URL` is qualified would leave the broken parent
+assertion running. Verified against pristine upstream: checked out the
+`v0.17.2` tag in a clean worktree with none of this fork's code and ran them
+there, and all four failed identically with no fork code present — they are
+upstream's own untested-but-unfixed gaps, not something this fork's changes
+caused.
+
+**Finding A is now fixed in this fork** (see "API signup invite-code gate
+(Finding A)" under "What diverges from upstream" above) and its two tests
+are unskipped and passing:
 
 - `TestAPISignupClosedRegistration` (subtests `no_invite_code`,
-  `bogus_invite_code`) — both fail "expected impart.HTTPError, got `<nil>`".
-- `TestInitRoutesAlwaysRegistersAPISignup` — fails "expected
-  `/api/auth/signup` to match a route even when OpenRegistration is false".
+  `bogus_invite_code`, `valid_invite_code`) — previously failed "expected
+  impart.HTTPError, got `<nil>`" on the first two; now passes all three,
+  including the valid-invite-code case still succeeding.
+- `TestInitRoutesAlwaysRegistersAPISignup` — previously failed "expected
+  `/api/auth/signup` to match a route even when OpenRegistration is false";
+  now passes.
+
+**Finding B is deliberately left unfixed** and its two tests remain skipped:
+
 - `TestOAuthSignupClosedRegistration` (subtests `no_invite_code`,
   `bogus_invite_code`) — same shape as the API signup test above.
 - `TestOAuthSignupCannotSwapInviteCodeWithoutInvalidatingSignature`.
 
-Re-check all four on every upstream merge and delete them from CI's `-skip`
-list the moment a release fixes them.
+Finding B concerns `/oauth/signup`'s invite-code gate in `oauth_signup.go`.
+This fork does not fix it because that route is not routed at all (see the
+"What diverges" table entry on `/oauth/signup` above), and its only gate,
+`HashTokenParams`, is an HMAC keyed on `Server.HashSeed` — which is empty in
+this fork's config, making the signature forgeable regardless of whether
+`InviteCode` is itself signed. Fixing it would expand the merge-surface
+budget from seven files to eight (`oauth_signup.go`) to harden a handler
+that is both unreachable and would remain forgeable even after the fix.
+**Revisit this the moment either changes**: if a future upstream merge ever
+routes `/oauth/signup`, or if `Server.HashSeed` is ever set in this fork's
+config, Finding B needs to be fixed for real.
+
+Re-check both remaining tests on every upstream merge and delete them from
+CI's `-skip` list the moment a release fixes Finding B (or this fork does).
 
 `TestViewOauthCallback/success` (`oauth_test.go`) used to have a matching
 entry here too, for a rationale that went stale (a pre-existing,
