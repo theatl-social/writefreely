@@ -1,6 +1,6 @@
 # theATL.social fork of WriteFreely
 
-Based on upstream [WriteFreely](https://github.com/writefreely/writefreely) **v0.17.1**.
+Based on upstream [WriteFreely](https://github.com/writefreely/writefreely) **v0.17.2**.
 Licensed under the AGPL-3.0, same as upstream. Source is published here to satisfy
 AGPL §13, since we run a modified build as a public network service at
 <https://write.theatl.social>.
@@ -180,6 +180,35 @@ Three extra steps, each earned by something that already bit us or nearly did:
   a hole and `database.go` is off our budget.
 - **Bump the AGPL §5(a) notice count** — it is seven files now.
 
+## Merge history
+
+**`v0.17.2`** (upstream commit `acdc6b9`, tag object `e041604`, dated
+2026-08-09) merged onto `theatl-main` with **zero conflicts**. All seven
+modified upstream files (`app.go`, `account.go`, `collections.go`,
+`routes.go`, `posts.go`, `oauth.go`, `author/author.go`) merged cleanly;
+upstream's own changes in this release landed in different regions of
+`account.go`, `app.go`, `collections.go`, and `posts.go` than this fork's
+edits, so nothing overlapped. The merge-surface budget is therefore
+**unchanged** at those same seven files, and the AGPL §5(a) notice count
+stays at seven — not bumped by this merge.
+
+The `CreateCollection` re-enumeration this section's "Merge policy" mandates
+on every upstream merge was performed: still exactly three call sites today
+— `collections.go` via `newCollection` (gated), `database.go` via `addPost`
+(gated at the handler), and `CreateCollectionFromToken`, which still has
+**zero** callers. The per-user blog cap gained no new hole from this merge.
+
+Upstream also removed the bundled Material Icons font files
+(`static/fonts/MaterialIcons-Regular.{eot,svg,ttf}`) and changed
+`less/icons.less` to serve only `.woff2`/`.woff` with `font-display: block`.
+This fork's CSS is built by `make ui` at image-build time rather than
+committed, so it isn't visible in this diff — re-check the built icon CSS
+after the first deploy on this version to confirm nothing broke.
+
+See the OAuth token-exchange entry under "Known limits" below for one more
+v0.17.2 change (`oauth_generic.go`) that needs attention on this specific
+deployment before or during that deploy.
+
 ## Known upstream test failures
 
 CI skips exactly this one **subtest** by its fully slash-qualified path
@@ -197,6 +226,28 @@ merge-surface budget above, and unrelated to anything in this fork:
 
 Revisit on every upstream merge. Delete this entry the moment a release fixes
 the underlying race.
+
+CI also skips four more tests as of the v0.17.2 merge, all from a new
+`signup_test.go` upstream shipped in that release. Unlike the entry above,
+these are skipped at the **parent test level** — no `/subtest` qualifier —
+because the whole test is broken, not one subtest beneath an otherwise-good
+parent; qualifying them the way `TestUpdatesRoundTrip/Release_URL` is
+qualified would leave the broken parent assertion running. Verified against
+pristine upstream: checked out the `v0.17.2` tag in a clean worktree with
+none of this fork's code and ran them there, and all four fail identically
+with no fork code present — they are upstream's own broken tests, not
+something this fork's changes caused:
+
+- `TestAPISignupClosedRegistration` (subtests `no_invite_code`,
+  `bogus_invite_code`) — both fail "expected impart.HTTPError, got `<nil>`".
+- `TestInitRoutesAlwaysRegistersAPISignup` — fails "expected
+  `/api/auth/signup` to match a route even when OpenRegistration is false".
+- `TestOAuthSignupClosedRegistration` (subtests `no_invite_code`,
+  `bogus_invite_code`) — same shape as the API signup test above.
+- `TestOAuthSignupCannotSwapInviteCodeWithoutInvalidatingSignature`.
+
+Re-check all four on every upstream merge and delete them from CI's `-skip`
+list the moment a release fixes them.
 
 `TestViewOauthCallback/success` (`oauth_test.go`) used to have a matching
 entry here too, for a rationale that went stale (a pre-existing,
@@ -248,29 +299,37 @@ user's *actual* blog count against their allowance, not only push allowances
 one-way — so an overshoot gets caught and reconciled rather than silently
 persisting.
 
-**In-app self-serve signup is closed by infrastructure, not by this repo.**
-Two signup routes exist (`routes.go`) and they are not equivalent:
+**Three signup routes exist (`routes.go`) and they are not equivalent.**
+This used to be a "closed by infrastructure, not by this repo" story for
+`/auth/signup`; upstream v0.17.2 closed the code-level bypass this entry
+used to describe, so the entry now records the (still-relevant) distinction
+between the three routes rather than a live hole:
 
 - `POST /api/auth/signup` IS gated by `open_registration` in config, at
   route-registration time — the handler is only mounted at all when
   `open_registration` is true.
 - `POST /auth/signup` is registered UNCONDITIONALLY, regardless of
-  `open_registration`. Its in-app check (`unregisteredusers.go`'s
-  `handleWebSignup`) only rejects when `open_registration` is false AND the
-  submitted `invite_code` form field is empty — ANY non-empty `invite_code`
-  bypasses that check. The code is never validated against the database
-  before the account is created: `account.go`'s `signupWithRegistration`
-  calls `CreateUser` first, and only afterward calls `database.go`'s
-  `CreateInvitedUser`, which is a bare insert into `usersinvited` recording
-  that this user supplied some invite code string — it does not check that
-  the code exists, is unexpired, or is unused. So `open_registration = false`
-  provides no real protection on `/auth/signup` at all; the only actual gate
-  on that route in this deployment is an external HAProxy ACL that lives
-  entirely outside this repository, not any config value in this app.
+  `open_registration`. As of upstream v0.17.2, its in-app check
+  (`unregisteredusers.go`'s `handleWebSignup`) no longer just checks whether
+  `invite_code` is a non-empty string: when `open_registration` is false it
+  now calls `app.db.GetUserInvite(ur.InviteCode)` and rejects with 403
+  "Registration is closed" if no such invite exists, then checks
+  `i.Active(app.db)` and rejects with 404 "Invite link has expired." if the
+  invite exists but isn't currently usable. An arbitrary non-empty code no
+  longer bypasses the check — the code is now validated against the
+  database before account creation, closing the gap the old wording of this
+  entry described. Practically, this makes the external HAProxy ACL on this
+  route defense-in-depth rather than the only real gate: `open_registration
+  = false` now provides actual protection on `/auth/signup` in code, not
+  just at the reverse proxy.
+- Only the OAuth JIT path (`oauth.go`, `oauth_preauth.go`) enforces its
+  access gate in code, unconditionally, via the `oauth_preauth` table — that
+  was true before this merge and is unchanged by it.
 
-Only the OAuth JIT path (`oauth.go`, `oauth_preauth.go`) enforces its access
-gate in code, unconditionally, via the `oauth_preauth` table. Don't conflate
-any of these when reasoning about what's "closed" on this instance.
+Don't conflate any of these when reasoning about what's "closed" on this
+instance: `/api/auth/signup` is closed by whether it's routed at all,
+`/auth/signup` is now closed by a real database check plus a redundant
+external ACL, and the OAuth path is closed by `oauth_preauth`.
 
 **A revoked/deleted account can still be re-provisioned by a later login.**
 `handleSetMastodonUserMaxBlogs` (`oauth_preauth.go`) now supports a
@@ -337,6 +396,26 @@ in. There is no backfill, deliberately: unlisted blogs are still fully public
 at their own URLs and still federate, so the only thing "unlisted" withholds
 is directory listing — which makes listing them retroactively an override of a
 choice their owners were shown.
+
+**Upstream v0.17.2 changed how OAuth client credentials are sent, and this
+instance has no fallback if the wrong choice breaks it.** Previously
+`oauth_generic.go`'s token exchange sent client credentials both in the POST
+form body and as HTTP Basic auth. A new `GenericOauthCfg.AuthUseRequestBody`
+field (`config/config.go`, ini key `auth_use_basic_auth`) now selects one or
+the other: false (the default, and what this fork's config leaves unset)
+sends credentials via HTTP Basic auth ONLY; true sends them in the request
+body ONLY. Every account on this instance is OAuth-JIT-provisioned and
+passwordless, and production runs `disable_password_auth = true` — if the
+Mastodon instance at theatl.social rejects HTTP Basic auth on its token
+endpoint, nobody can log in and there is no password fallback to fall back
+to. Confirm the Mastodon token endpoint accepts HTTP Basic auth before or
+immediately after deploying this merge.
+
+Also note the naming trap for whoever debugs a login failure here next: the
+ini key is `auth_use_basic_auth`, but setting it `true` sets
+`AuthUseRequestBody = true` — which puts credentials in the request BODY,
+the opposite of what the key name reads like. Reading "use_basic_auth =
+true" and concluding that turns Basic auth ON is exactly backwards.
 
 **The vet gate doesn't cover every fork-owned file.** The vet step in
 `.github/workflows/ci.yml` greps `vet.log` for `(^|/)maxblogs[a-z_]*\.go:`
