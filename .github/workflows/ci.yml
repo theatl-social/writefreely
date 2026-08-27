@@ -175,7 +175,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: TruffleHog (verified and unverified)
-        uses: trufflesecurity/trufflehog@v3.96.0
+        uses: trufflesecurity/trufflehog@v3.97.1
         with:
           path: ./
           extra_args: --debug
