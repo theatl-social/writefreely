@@ -163,9 +163,21 @@ the merge surface entirely.
 ## Merge policy
 
 Only `app.go`, `account.go`, `collections.go`, `routes.go`, `posts.go`,
-`oauth.go`, and `author/author.go` are modified, by one line or a short block
-each, all marked with `theATL fork:` comments. Merge upstream releases onto
-`theatl-main`; conflicts should be confined to those seven files.
+`oauth.go`, `author/author.go`, and `activitypub.go` are modified, by one line
+or a short block each, all marked with `theATL fork:` comments. Merge upstream
+releases onto `theatl-main`; conflicts should be confined to those **eight**
+files.
+
+`activitypub.go` is the eighth, added 2026-09-09 by the ActivityPub SSRF
+hardening (see "Merge history"). It is the only entry on this budget that
+exists to strengthen an upstream security fix rather than to add a feature:
+upstream's `isPublicIRI()` validates the hostname *before* DNS resolution,
+and the transport resolves again when it dials, so `activityPubClient()` now
+carries a `DialContext` that validates the address actually connected to, plus
+a redirect policy. Both reuse code upstream already added to this package in
+`36dd733`. **If a future upstream release hardens `activityPubClient()`
+itself, drop this fork's version and take theirs** -- that would return the
+budget to seven.
 `author/author.go` is the seventh, added by the discovery feed to reserve
 `blog`/`blogs` in `reservedUsernames` so no collection can claim an alias
 that collides with the `/blogs` route — a two-entry addition to a static map
@@ -202,7 +214,7 @@ Three extra steps, each earned by something that already bit us or nearly did:
   (gated at the handler), and `CreateCollectionFromToken` (`database.go:290`,
   zero callers). If upstream wires the third to a route, the cap silently gains
   a hole and `database.go` is off our budget.
-- **Bump the AGPL §5(a) notice count** — it is seven files now.
+- **Bump the AGPL §5(a) notice count** — it is eight files now.
 
 ## Merge history
 
@@ -255,6 +267,28 @@ unchanged at seven.
 this fork. `TestOAuthSignupClosedRegistration` and
 `TestOAuthSignupCannotSwapInviteCodeWithoutInvalidatingSignature` now pass
 and have been removed from the CI skip list, which is down to one entry.
+
+**One fork-authored addition rides along with these backports:
+`activitypub.go`'s client is hardened beyond what upstream shipped.**
+Upstream's `3e56d3a` guards `resolveIRI()` with `isPublicIRI()`, which parses
+the URL, resolves the host, checks the IPs, and returns -- and then
+`activityPubClient().Do()` resolves the host a second time when it dials. A
+host whose authoritative DNS answers with a public address for the first
+lookup and a private one for the second passes the check and reaches the
+internal target anyway, and redirects were never checked at all. This is
+reachable from `POST /api/collections/{alias}/inbox`, which is registered
+with `handler.All` and is therefore unauthenticated.
+
+`activityPubClient()` now uses `safeDialContext` -- upstream's own function
+from `36dd733`, already in this package -- which resolves once and dials the
+vetted IP literally, plus a `CheckRedirect` that re-validates each hop and
+caps the chain at five. This is upstream's own stated preference: `e01f7d0`
+reverted the pre-flight check from `webfinger.go` six minutes after adding
+it, on the grounds that the dial-time client handled it "more robustly".
+They simply never applied that reasoning to the ActivityPub client. Covered
+by `activitypub_ssrf_test.go` (fork-owned; per the convention above,
+`_test.go` files carry no AGPL header). This is what takes the merge budget
+from seven files to eight.
 
 The `CreateCollection` re-enumeration this section's "Merge policy" mandates
 was performed: still exactly three call sites -- `collections.go` via

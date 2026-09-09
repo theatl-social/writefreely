@@ -107,6 +107,37 @@ func (ru *RemoteUser) AsPerson() *activitystreams.Person {
 func activityPubClient() *http.Client {
 	return &http.Client{
 		Timeout: 15 * time.Second,
+		// theATL fork: validate the address actually dialled, not just the
+		// hostname supplied. isPublicIRI (below) resolves the host and
+		// returns; the transport then resolves again when it connects, so a
+		// host whose DNS answers public once and private once slips through
+		// that gap. safeDialContext (webfinger.go, same package, added by
+		// upstream 36dd733) resolves once and dials the vetted IP literally,
+		// closing it. This applies upstream's own stated reasoning from
+		// e01f7d0 -- "handled more robustly in other pending changes" -- to
+		// the client upstream did not get to. It matters here because
+		// resolveIRI is reachable from the unauthenticated federation inbox
+		// (POST /api/collections/{alias}/inbox) with an attacker-supplied IRI.
+		//
+		// Proxy and ForceAttemptHTTP2 restore what the default transport
+		// would have provided; naming a Transport otherwise silently drops
+		// both.
+		Transport: &http.Transport{
+			Proxy:             http.ProxyFromEnvironment,
+			DialContext:       safeDialContext,
+			ForceAttemptHTTP2: true,
+		},
+		// theATL fork: isPublicIRI only ever sees the original URL, so
+		// without this a permitted host can redirect the request to an
+		// internal one. safeDialContext above would still refuse the
+		// connection; this rejects the hop earlier, with a clearer error,
+		// and caps the chain.
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return fmt.Errorf("too many redirects")
+			}
+			return isPublicIRI(req.URL.String())
+		},
 	}
 }
 
