@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -106,6 +107,37 @@ func (ru *RemoteUser) AsPerson() *activitystreams.Person {
 func activityPubClient() *http.Client {
 	return &http.Client{
 		Timeout: 15 * time.Second,
+		// theATL fork: validate the address actually dialled, not just the
+		// hostname supplied. isPublicIRI (below) resolves the host and
+		// returns; the transport then resolves again when it connects, so a
+		// host whose DNS answers public once and private once slips through
+		// that gap. safeDialContext (webfinger.go, same package, added by
+		// upstream 36dd733) resolves once and dials the vetted IP literally,
+		// closing it. This applies upstream's own stated reasoning from
+		// e01f7d0 -- "handled more robustly in other pending changes" -- to
+		// the client upstream did not get to. It matters here because
+		// resolveIRI is reachable from the unauthenticated federation inbox
+		// (POST /api/collections/{alias}/inbox) with an attacker-supplied IRI.
+		//
+		// Proxy and ForceAttemptHTTP2 restore what the default transport
+		// would have provided; naming a Transport otherwise silently drops
+		// both.
+		Transport: &http.Transport{
+			Proxy:             http.ProxyFromEnvironment,
+			DialContext:       safeDialContext,
+			ForceAttemptHTTP2: true,
+		},
+		// theATL fork: isPublicIRI only ever sees the original URL, so
+		// without this a permitted host can redirect the request to an
+		// internal one. safeDialContext above would still refuse the
+		// connection; this rejects the hop earlier, with a clearer error,
+		// and caps the chain.
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return fmt.Errorf("too many redirects")
+			}
+			return isPublicIRI(req.URL.String())
+		},
 	}
 }
 
@@ -118,7 +150,6 @@ func handleFetchCollectionActivities(app *App, w http.ResponseWriter, r *http.Re
 		alias = filepath.Base(r.RequestURI)
 	}
 
-	// TODO: enforce visibility
 	// Get base Collection data
 	var c *Collection
 	var err error
@@ -135,6 +166,9 @@ func handleFetchCollectionActivities(app *App, w http.ResponseWriter, r *http.Re
 	c.hostName = app.cfg.App.Host
 
 	if !c.IsInstanceColl() {
+		if c.IsPrivate() || c.IsProtected() {
+			return ErrCollectionNotFound
+		}
 		silenced, err := app.db.IsUserSilenced(c.OwnerID)
 		if err != nil {
 			log.Error("fetch collection activities: %v", err)
@@ -157,7 +191,6 @@ func handleFetchCollectionOutbox(app *App, w http.ResponseWriter, r *http.Reques
 	vars := mux.Vars(r)
 	alias := vars["alias"]
 
-	// TODO: enforce visibility
 	// Get base Collection data
 	var c *Collection
 	var err error
@@ -168,6 +201,9 @@ func handleFetchCollectionOutbox(app *App, w http.ResponseWriter, r *http.Reques
 	}
 	if err != nil {
 		return err
+	}
+	if c.IsPrivate() || c.IsProtected() {
+		return ErrCollectionNotFound
 	}
 	silenced, err := app.db.IsUserSilenced(c.OwnerID)
 	if err != nil {
@@ -220,7 +256,6 @@ func handleFetchCollectionFollowers(app *App, w http.ResponseWriter, r *http.Req
 	vars := mux.Vars(r)
 	alias := vars["alias"]
 
-	// TODO: enforce visibility
 	// Get base Collection data
 	var c *Collection
 	var err error
@@ -231,6 +266,9 @@ func handleFetchCollectionFollowers(app *App, w http.ResponseWriter, r *http.Req
 	}
 	if err != nil {
 		return err
+	}
+	if c.IsPrivate() || c.IsProtected() {
+		return ErrCollectionNotFound
 	}
 	silenced, err := app.db.IsUserSilenced(c.OwnerID)
 	if err != nil {
@@ -275,7 +313,6 @@ func handleFetchCollectionFollowing(app *App, w http.ResponseWriter, r *http.Req
 	vars := mux.Vars(r)
 	alias := vars["alias"]
 
-	// TODO: enforce visibility
 	// Get base Collection data
 	var c *Collection
 	var err error
@@ -286,6 +323,9 @@ func handleFetchCollectionFollowing(app *App, w http.ResponseWriter, r *http.Req
 	}
 	if err != nil {
 		return err
+	}
+	if c.IsPrivate() || c.IsProtected() {
+		return ErrCollectionNotFound
 	}
 	silenced, err := app.db.IsUserSilenced(c.OwnerID)
 	if err != nil {
@@ -796,8 +836,41 @@ func makeActivityPost(hostName string, p *activitystreams.Person, url string, m 
 	return nil
 }
 
+// isPublicIRI reports whether iri is an http(s) URL whose host resolves
+// exclusively to public, routable IP addresses. It rejects loopback,
+// private, link-local (including cloud metadata endpoints like
+// 169.254.169.254), and unspecified addresses to mitigate SSRF via
+// attacker-supplied ActivityPub IRIs (e.g. inbox actor/object fields).
+func isPublicIRI(iri string) error {
+	u, err := url.Parse(iri)
+	if err != nil {
+		return fmt.Errorf("invalid IRI: %v", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("unsupported IRI scheme %q", u.Scheme)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("missing host in IRI")
+	}
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return fmt.Errorf("unable to resolve host %q: %v", host, err)
+	}
+	for _, ip := range ips {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+			return fmt.Errorf("host %q resolves to disallowed address %s", host, ip)
+		}
+	}
+	return nil
+}
+
 func resolveIRI(hostName, url string) ([]byte, error) {
 	log.Info("GET %s", url)
+
+	if err := isPublicIRI(url); err != nil {
+		return nil, fmt.Errorf("refusing to fetch IRI: %v", err)
+	}
 
 	r, _ := http.NewRequest("GET", url, nil)
 	r.Header.Add("Accept", "application/activity+json")

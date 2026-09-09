@@ -49,39 +49,29 @@ Everything else is upstream. Both internal endpoints require the
 `WRITEFREELY_API_SECRET` environment variable (32+ characters) in an
 `X-WriteFreely-Secret` header, and are additionally blocked at our reverse proxy.
 
-**API signup invite-code gate (Finding A).** Upstream v0.17.2 shipped
-`signup_test.go` with tests for two named security findings ("Finding A" and
-"Finding B") but did **not** ship the corresponding code fixes — verified by
-checking out the `v0.17.2` tag in a clean worktree with none of this fork's
-code and confirming both findings' tests fail there too. This fork fixes
-Finding A. Finding B (`/oauth/signup`'s invite-code gate) is deliberately
-left unfixed — see "Known upstream test failures" below for why.
+**API signup invite-code gate (Findings A and B) — no longer a divergence.**
+This fork carried its own fix for Finding A (`ef89388`, PR #17) between
+2026-08-25 and 2026-09-09. It has been **removed**, because upstream's
+`dd2de20` fixes the same hole more broadly and was backported on 2026-09-09
+(see "Merge history"). Upstream's `canRegister()` gate sits in
+`signupWithRegistration()`, downstream of both `signup()` and
+`handleWebSignup`, so it covers strictly more paths than this fork's inline
+block in `signup()` did, and additionally gates on `DisablePasswordAuth`.
+The `theATL fork:` comment above the `/api/auth/signup` registration in
+`routes.go` was dropped at the same time: that line is now upstream's own
+behaviour, byte-identical to what the fork had.
 
-Finding A was two compounding gaps: `/api/auth/signup` was registered in
-`routes.go` only when `open_registration` was true **at boot**, so an admin
-toggling registration closed later left the route live with no invite check
-at all; and `signup()` (`account.go`) never validated invite codes even when
-reachable, so the route — whenever it was reachable — created accounts with
-no gate whatsoever.
+The same backport also fixed Finding B (`/oauth/signup`'s invite-code gate),
+which this fork had deliberately declined to fix on the reasoning that the
+route is unrouted here and its HMAC gate is keyed on an empty
+`Server.HashSeed` regardless. That reasoning is now moot; all four of
+upstream's `signup_test.go` tests pass and none are skipped in CI.
 
-| Change | Location |
-|---|---|
-| `/api/auth/signup` registered unconditionally instead of only when `OpenRegistration` was true at boot; the gate now lives in the handler, where it's re-evaluated per-request instead of frozen at startup | `routes.go` |
-| `signup()` validates `ur.InviteCode` via `GetUserInvite` + `Active` when `OpenRegistration` is false, returning 403/404 exactly like the web signup path. Placed after `ur` is fully populated from either the JSON or form branch, before any account is created | `account.go` `signup()` |
-
-This mirrors the check `handleWebSignup` (`unregisteredusers.go`) already
-performs for the web signup path — that path was unaffected by either gap,
-since it never went through `signup()` at all (it calls
-`signupWithRegistration` directly), and already carried upstream's own fix.
-
-**Because upstream shipped tests for this without shipping the fix, a future
-upstream merge must not be assumed to silently carry a real fix along with
-it.** If a later release adds its own code fix alongside (or instead of) the
-tests, treat that as a conflict to reconcile deliberately — read what
-upstream did, compare it to this fork's fix, and pick one (or merge the
-better parts of both) rather than blindly accepting upstream's version and
-regressing this fix, or blindly keeping this fork's version and missing an
-improvement upstream made.
+**Because upstream shipped tests for both findings a full release before
+shipping either fix, a future upstream merge must not be assumed to silently
+carry a real fix along with its tests.** Read what upstream actually did
+before assuming a passing test means a fixed hole — and before assuming a
+failing one means this fork broke something.
 
 **Instance discovery feed.** Upstream shows a marketing landing page to
 anonymous visitors at `/` and the editor to logged-in ones, and has no page
@@ -173,9 +163,21 @@ the merge surface entirely.
 ## Merge policy
 
 Only `app.go`, `account.go`, `collections.go`, `routes.go`, `posts.go`,
-`oauth.go`, and `author/author.go` are modified, by one line or a short block
-each, all marked with `theATL fork:` comments. Merge upstream releases onto
-`theatl-main`; conflicts should be confined to those seven files.
+`oauth.go`, `author/author.go`, and `activitypub.go` are modified, by one line
+or a short block each, all marked with `theATL fork:` comments. Merge upstream
+releases onto `theatl-main`; conflicts should be confined to those **eight**
+files.
+
+`activitypub.go` is the eighth, added 2026-09-09 by the ActivityPub SSRF
+hardening (see "Merge history"). It is the only entry on this budget that
+exists to strengthen an upstream security fix rather than to add a feature:
+upstream's `isPublicIRI()` validates the hostname *before* DNS resolution,
+and the transport resolves again when it dials, so `activityPubClient()` now
+carries a `DialContext` that validates the address actually connected to, plus
+a redirect policy. Both reuse code upstream already added to this package in
+`36dd733`. **If a future upstream release hardens `activityPubClient()`
+itself, drop this fork's version and take theirs** -- that would return the
+budget to seven.
 `author/author.go` is the seventh, added by the discovery feed to reserve
 `blog`/`blogs` in `reservedUsernames` so no collection can claim an alias
 that collides with the `/blogs` route — a two-entry addition to a static map
@@ -212,9 +214,87 @@ Three extra steps, each earned by something that already bit us or nearly did:
   (gated at the handler), and `CreateCollectionFromToken` (`database.go:290`,
   zero callers). If upstream wires the third to a route, the cap silently gains
   a hole and `database.go` is off our budget.
-- **Bump the AGPL §5(a) notice count** — it is seven files now.
+- **Bump the AGPL §5(a) notice count** — it is eight files now.
 
 ## Merge history
+
+**Security backports from `develop` (post-`v0.17.2`, 2026-09-09).** Eight
+upstream commits cherry-picked onto `theatl-main` ahead of any v0.17.3
+release, because three carry published GitHub advisories and upstream cut
+`v0.17.2` on 2026-08-10 at 07:27 UTC -- hours before most of these landed.
+This is the one deliberate exception to "merge upstream releases": the
+fixes are taken as named cherry-picks with `-x` provenance lines, not as a
+merge of an unreleased branch, so a later `v0.17.3` merge sees them as
+already applied.
+
+| Upstream | Fix |
+|---|---|
+| `d7231d8` | Always sanitize slugs on post creation (stored-XSS via API) |
+| `48083e0` | CSRF on `/me` endpoints -- **GHSA-mp2f-3fq8-r9vj** |
+| `477d0de` | Only the blog owner may pin posts -- **GHSA-hwfg-mg9c-cvgf** |
+| `36dd733` | SSRF in webfinger `RemoteLookup` (dial-time IP validation) |
+| `3e56d3a` | SSRF via ActivityPub inbox actor/object IRI resolution |
+| `c4d0ac6` | Password-protected blogs not unlocking after cookie expiry |
+| `dd2de20` | Signup checks enforced across web, API, and OAuth paths |
+| `7fb71bc` | Private/protected blogs readable via AP -- **GHSA-cx5r-gg25-76ph** |
+
+Two conflicts, both trivial. `go.mod`: upstream's hunk moves `go 1.19` ->
+`1.21` with a `toolchain go1.23.0` directive; dropped, since this fork is
+already on `go 1.25.0` matching the `golang:1.25-alpine3.22` Dockerfile pin.
+`routes.go`: a **comment-only** conflict -- see below.
+
+`e01f7d0` is folded into `3e56d3a`'s conflict resolution rather than applied
+separately. Upstream added `isPublicIRI()` to `webfinger.go`'s
+`RemoteLookup()` in `3e56d3a`, then reverted that hunk six minutes later
+("The SSRF fix is already handled more robustly in other pending changes")
+because `36dd733`'s dial-time client already covers it without the
+DNS-rebinding window a pre-request hostname check leaves open. `webfinger.go`
+here is byte-identical to upstream `develop`'s final state.
+
+**This merge shrank the fork surface rather than growing it.** `dd2de20`
+supersedes this fork's own Finding A fix (`ef89388`, PR #17): upstream's
+`canRegister()` lives in `signupWithRegistration()`, downstream of both
+`signup()` and `handleWebSignup`, so it covers strictly more paths than the
+fork's inline block in `signup()` did, and additionally gates on
+`DisablePasswordAuth`. The inline block is removed, and the `theATL fork:`
+comment above the `/api/auth/signup` registration in `routes.go` is dropped
+because that line is now upstream's own behaviour, byte-identical to what
+the fork had. Seven-file merge budget and AGPL S5(a) notice count both
+unchanged at seven.
+
+`dd2de20` also fixes **Finding B** (`oauth_signup.go`'s invite gate), which
+`ef89388` explicitly left out of scope because that route is unrouted in
+this fork. `TestOAuthSignupClosedRegistration` and
+`TestOAuthSignupCannotSwapInviteCodeWithoutInvalidatingSignature` now pass
+and have been removed from the CI skip list, which is down to one entry.
+
+**One fork-authored addition rides along with these backports:
+`activitypub.go`'s client is hardened beyond what upstream shipped.**
+Upstream's `3e56d3a` guards `resolveIRI()` with `isPublicIRI()`, which parses
+the URL, resolves the host, checks the IPs, and returns -- and then
+`activityPubClient().Do()` resolves the host a second time when it dials. A
+host whose authoritative DNS answers with a public address for the first
+lookup and a private one for the second passes the check and reaches the
+internal target anyway, and redirects were never checked at all. This is
+reachable from `POST /api/collections/{alias}/inbox`, which is registered
+with `handler.All` and is therefore unauthenticated.
+
+`activityPubClient()` now uses `safeDialContext` -- upstream's own function
+from `36dd733`, already in this package -- which resolves once and dials the
+vetted IP literally, plus a `CheckRedirect` that re-validates each hop and
+caps the chain at five. This is upstream's own stated preference: `e01f7d0`
+reverted the pre-flight check from `webfinger.go` six minutes after adding
+it, on the grounds that the dial-time client handled it "more robustly".
+They simply never applied that reasoning to the ActivityPub client. Covered
+by `activitypub_ssrf_test.go` (fork-owned; per the convention above,
+`_test.go` files carry no AGPL header). This is what takes the merge budget
+from seven files to eight.
+
+The `CreateCollection` re-enumeration this section's "Merge policy" mandates
+was performed: still exactly three call sites -- `collections.go` via
+`newCollection` (gated), `database.go` via `addPost` (gated at the handler),
+and `CreateCollectionFromToken`, still with **zero** callers. None of these
+eight commits touched them. The per-user blog cap gained no new hole.
 
 **`v0.17.2`** (upstream commit `acdc6b9`, tag object `e041604`, dated
 2026-08-09) merged onto `theatl-main` with **zero conflicts**. All seven
@@ -263,49 +343,30 @@ the underlying race.
 
 Upstream v0.17.2 also shipped a new `signup_test.go` with four tests for two
 named security findings ("Finding A" and "Finding B"), but no corresponding
-code fix for either. Unlike the entry above, all four were (and the
-remaining two still are) skipped at the **parent test level** — no
-`/subtest` qualifier — because the whole test is broken, not one subtest
-beneath an otherwise-good parent; qualifying them the way
-`TestUpdatesRoundTrip/Release_URL` is qualified would leave the broken parent
-assertion running. Verified against pristine upstream: checked out the
+code fix for either. Verified against pristine upstream: checked out the
 `v0.17.2` tag in a clean worktree with none of this fork's code and ran them
-there, and all four failed identically with no fork code present — they are
-upstream's own untested-but-unfixed gaps, not something this fork's changes
-caused.
+there, and all four failed identically with no fork code present — they were
+upstream's own untested-but-unfixed gaps, not something this fork caused.
 
-**Finding A is now fixed in this fork** (see "API signup invite-code gate
-(Finding A)" under "What diverges from upstream" above) and its two tests
-are unskipped and passing:
+**All four now pass and none are skipped.** Finding A was fixed by this fork
+in `ef89388` (PR #17) and is now fixed upstream by `dd2de20`, backported
+2026-09-09; the fork's own version was removed as redundant. Finding B,
+which this fork had deliberately declined to fix, is fixed by that same
+`dd2de20` — it routes the OAuth path through `canRegister()` and includes
+the invite code in the signature. The four tests are:
 
 - `TestAPISignupClosedRegistration` (subtests `no_invite_code`,
-  `bogus_invite_code`, `valid_invite_code`) — previously failed "expected
-  impart.HTTPError, got `<nil>`" on the first two; now passes all three,
-  including the valid-invite-code case still succeeding.
-- `TestInitRoutesAlwaysRegistersAPISignup` — previously failed "expected
-  `/api/auth/signup` to match a route even when OpenRegistration is false";
-  now passes.
-
-**Finding B is deliberately left unfixed** and its two tests remain skipped:
-
+  `bogus_invite_code`, `valid_invite_code`)
+- `TestInitRoutesAlwaysRegistersAPISignup`
 - `TestOAuthSignupClosedRegistration` (subtests `no_invite_code`,
-  `bogus_invite_code`) — same shape as the API signup test above.
-- `TestOAuthSignupCannotSwapInviteCodeWithoutInvalidatingSignature`.
+  `bogus_invite_code`, `valid_invite_code`)
+- `TestOAuthSignupCannotSwapInviteCodeWithoutInvalidatingSignature`
 
-Finding B concerns `/oauth/signup`'s invite-code gate in `oauth_signup.go`.
-This fork does not fix it because that route is not routed at all (see the
-"What diverges" table entry on `/oauth/signup` above), and its only gate,
-`HashTokenParams`, is an HMAC keyed on `Server.HashSeed` — which is empty in
-this fork's config, making the signature forgeable regardless of whether
-`InviteCode` is itself signed. Fixing it would expand the merge-surface
-budget from seven files to eight (`oauth_signup.go`) to harden a handler
-that is both unreachable and would remain forgeable even after the fix.
-**Revisit this the moment either changes**: if a future upstream merge ever
-routes `/oauth/signup`, or if `Server.HashSeed` is ever set in this fork's
-config, Finding B needs to be fixed for real.
-
-Re-check both remaining tests on every upstream merge and delete them from
-CI's `-skip` list the moment a release fixes Finding B (or this fork does).
+CI's `-skip` list is consequently down to a single entry
+(`TestUpdatesRoundTrip/Release_URL`). Re-check all four on every upstream
+merge: upstream has shipped these tests ahead of their fixes once already,
+so a failure here is more likely to mean upstream regressed than that this
+fork did.
 
 `TestViewOauthCallback/success` (`oauth_test.go`) used to have a matching
 entry here too, for a rationale that went stale (a pre-existing,

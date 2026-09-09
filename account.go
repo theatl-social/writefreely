@@ -134,26 +134,20 @@ func signup(app *App, w http.ResponseWriter, r *http.Request) (*AuthUser, error)
 		}
 	}
 
-	// theATL fork: the API signup route is now always registered (see
-	// routes.go), even when registration is closed, so this handler must
-	// enforce the invite gate itself instead of relying on the route being
-	// absent. Mirrors the check handleWebSignup already performs for the
-	// web signup flow (unregisteredusers.go).
-	if !app.cfg.App.OpenRegistration {
-		i, err := app.db.GetUserInvite(ur.InviteCode)
-		if err != nil {
-			return nil, impart.HTTPError{http.StatusForbidden, "Registration is closed"}
-		}
-		if !i.Active(app.db) {
-			return nil, impart.HTTPError{http.StatusNotFound, "Invite link has expired."}
-		}
-	}
-
 	return signupWithRegistration(app, ur, w, r)
 }
 
 func signupWithRegistration(app *App, signup userRegistration, w http.ResponseWriter, r *http.Request) (*AuthUser, error) {
 	reqJSON := IsJSON(r)
+
+	// Signup checks are enforced here to keep them from being bypassed on different endpoints.
+	if app.cfg.App.DisablePasswordAuth {
+		return nil, ErrDisabledPasswordAuth
+	}
+	// Closed registration requires a valid, active invite code.
+	if err := app.canRegister(signup.InviteCode); err != nil {
+		return nil, err
+	}
 
 	// Validate required params (alias)
 	if signup.Alias == "" {
