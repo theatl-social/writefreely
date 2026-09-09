@@ -126,37 +126,37 @@ jobs:
       #
       # Upstream v0.17.2 shipped a new signup_test.go containing four tests
       # for two named security findings ("Finding A" and "Finding B") but did
-      # NOT ship the corresponding code fixes — verified by checking out the
+      # NOT ship the corresponding code fixes -- verified by checking out the
       # v0.17.2 tag in a clean worktree with none of this fork's code and
       # running them there; all four fail identically with no fork code
       # present.
       #
+      # BOTH findings are now fixed and ALL FOUR tests run unskipped.
+      #
       # Finding A (the API signup route stayed registered after an admin
       # toggled registration closed at runtime, and signup() never validated
-      # invite codes) is now FIXED in this fork -- see the "theATL fork:"
-      # comments in routes.go and account.go -- so its two tests are no
-      # longer skipped:
+      # invite codes) was fixed by this fork in ef89388 / PR #17, and is now
+      # fixed upstream by dd2de20 ("Enforce signup checks consistently across
+      # all registration paths"), backported 2026-09-09. Upstream's gate lives
+      # in signupWithRegistration() via canRegister(), which is downstream of
+      # both signup() and handleWebSignup and therefore covers strictly more
+      # paths than the fork's inline block did; the fork's version was removed
+      # as redundant. Tests: TestAPISignupClosedRegistration,
+      # TestInitRoutesAlwaysRegistersAPISignup.
       #
-      #   - TestAPISignupClosedRegistration
-      #   - TestInitRoutesAlwaysRegistersAPISignup
+      # Finding B (/oauth/signup's invite-code gate) was previously left
+      # unfixed here on the reasoning that the route is unrouted in this fork
+      # and its HMAC gate is keyed on an empty Server.HashSeed anyway. That
+      # same dd2de20 backport fixes it for real -- it funnels the OAuth path
+      # through canRegister() too and includes the invite code in the
+      # signature -- so both of its tests now pass and have been removed from
+      # the -skip list below:
       #
-      # Finding B (/oauth/signup's invite-code gate) is deliberately left
-      # unfixed: this fork never routes /oauth/signup at all, and its only
-      # gate, HashTokenParams, is an HMAC keyed on Server.HashSeed, which is
-      # empty in this fork's config -- making it forgeable regardless of
-      # whether InviteCode is signed. Fixing it would add an eighth file to
-      # the merge-surface budget to harden a handler that is unreachable and
-      # would remain forgeable. See FORK.md for the full reasoning and the
-      # trigger conditions for revisiting. Its two tests remain skipped at
-      # the PARENT test level (no "/subtest" qualifier: the whole test is
-      # broken here, not one subtest beneath an otherwise-good parent):
-      #
-      #   - TestOAuthSignupClosedRegistration (subtests no_invite_code,
-      #     bogus_invite_code)
+      #   - TestOAuthSignupClosedRegistration
       #   - TestOAuthSignupCannotSwapInviteCodeWithoutInvalidatingSignature
       #
-      # Re-check both on every upstream merge and delete them from this list
-      # the moment upstream fixes Finding B (or this fork does).
+      # Re-check all four on every upstream merge; they are upstream's own
+      # tests and upstream has shipped them ahead of their fixes before.
       - name: Test
         env:
           TEST_MYSQL: '1'
@@ -164,7 +164,7 @@ jobs:
           WF_PASSWORD: ci_pw
           WF_DB: writefreely
           WF_HOST: 127.0.0.1
-        run: go test -vet=off -tags='netgo sqlite' -skip 'TestUpdatesRoundTrip/Release_URL|TestOAuthSignupClosedRegistration|TestOAuthSignupCannotSwapInviteCodeWithoutInvalidatingSignature' ./... -v
+        run: go test -vet=off -tags='netgo sqlite' -skip 'TestUpdatesRoundTrip/Release_URL' ./... -v
 
   secret-scan:
     runs-on: ubuntu-latest
